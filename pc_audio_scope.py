@@ -2065,19 +2065,25 @@ class App:
         nfont = tkfont.Font(root=self.root, font=self.F(8))
         wm, w2 = nfont.measure('-'), nfont.measure('48')
         col_x = self.bal_x - (wm + w2) / 2.0 + wm  # the first digit of every number of the dB scale starts here (the 0, the 6 of -6, the 1 of -12 ...), the minus signs hang to its left
+        GAP_SHIFT = {-12: 2, -24: 3, -48: 2}  # pixels at scale 1: measured on the drawn digits (the 1, 2 and 4 have different side gaps)
         for dd in (0, -6, -12, -24, -48):  # each number sits on its line, which runs out to the bars on both sides of it
             yy = y0 + S(20) + (-dd) / 60.0 * self.bar_h
             col = self.th.peak if dd == 0 else self.GRID
             digits = str(abs(dd))
-            c.create_line(self.bar_xs[0] + S(54), yy, col_x - S(3) - (wm if dd < 0 else 0), yy, fill=col)  # the 0 has no minus sign, so its line runs on to the digit
-            c.create_line(col_x + nfont.measure(digits) + S(3), yy, self.bar_xs[1] - S(4), yy, fill=col)
-            c.create_text(col_x, yy, text=digits, fill=(self.th.peak if dd == 0 else self.TXT), font=self.F(8), anchor='w')
+            lx = col_x - S(GAP_SHIFT.get(dd, 0))  # the two-digit numbers sit a hair to the left, so the gap between their two digits is on the balance bar's centre line
+            c.create_line(self.bar_xs[0] + S(54), yy, lx - S(3) - (wm if dd < 0 else 0), yy, fill=col)  # the 0 has no minus sign, so its line runs on to the digit
+            c.create_line(lx + nfont.measure(digits) + S(3), yy, self.bar_xs[1] - S(4), yy, fill=col)
+            c.create_text(lx, yy, text=digits, fill=(self.th.peak if dd == 0 else self.TXT), font=self.F(8), anchor='w')
             if dd < 0:
-                c.create_text(col_x, yy, text='-', fill=self.TXT, font=self.F(8), anchor='e')
+                c.create_text(lx, yy, text='-', fill=self.TXT, font=self.F(8), anchor='e')
         # the text is one block at the bottom of the panel, the balance figure its last line; the balance bar hangs on the level of the vectorscope's centre line, between the level bars and the text
         lh = tkfont.Font(root=self.root, font=self.F(9)).metrics('linespace')
         txt_top = y1 - S(8) - 5 * lh - S(4)
         self.m_txt = c.create_text(S(924) + mx, txt_top, text='', fill=self.TXT, font=self.F(9), anchor='nw')
+        # the letters L and R of the figures are drawn apart, each in its channel's colour: character 16 and character 27 of every line (the font is monospaced, so they are in columns)
+        mfont = tkfont.Font(root=self.root, font=self.F(9))
+        c.create_text(S(924) + mx + mfont.measure(' ' * 16), txt_top, text=chr(10).join('LLLL'), fill=self.CL, font=self.F(9), anchor='nw')
+        c.create_text(S(924) + mx + mfont.measure(' ' * 27), txt_top, text=chr(10).join('RRRR'), fill=self.CR, font=self.F(9), anchor='nw')
         self.bal_y = int(round((y0 + y1) / 2.0))  # level of the vectorscope's centre line (it has the same top and bottom as this panel)
         self.bal_lbl = c.create_text(S(924) + mx, txt_top + 4 * lh + S(4), text='', fill=self.TXT, font=self.F(9), anchor='nw')
         # spectrum (tag 'spec') and spectrogram (tag 'sg')
@@ -3448,11 +3454,11 @@ class App:
         if self.zoom is None:
             self.draw_bars(x0 + 1, y0 + 1)
         bal = (self.bal_lv[1] - self.bal_lv[0]) if min(self.bal_lv) > -100 else 0.0
-        c.itemconfig(self.bal_lbl, text='balance  %+.1f dB' % (-bal + 0.0))  # positive: the left channel is louder (its bar is the longer)
-        c.itemconfig(self.m_txt, text=('peak  L %6.1f   R %6.1f dBFS\n' % tuple(dbn) +
-                                       'hold  L %6.1f   R %6.1f\n' % tuple(self.hold) +
-                                       '%s  L %5.1f  R %5.1f\n' % ('clip peak' if clip is not None else 'session peak', db(sess[0]) + cd, db(sess[1]) + cd) +
-                                       'clipped blocks  L %d  R %d' % tuple(flat)))
+        c.itemconfig(self.bal_lbl, text='%-16s%+.1f dB' % ('balance', -bal + 0.0))  # positive: the left channel is louder (its bar is the longer)
+        c.itemconfig(self.m_txt, text=('%-15s   %6.1f     %6.1f\n' % (('hold',) + tuple(self.hold)) +
+                                       '%-15s   %6.1f     %6.1f\n' % (('peak',) + tuple(dbn)) +
+                                       '%-15s   %6.1f     %6.1f\n' % (('clip peak' if clip is not None else 'session peak', db(sess[0]) + cd, db(sess[1]) + cd)) +
+                                       '%-15s   %6d     %6d' % (('clipped blocks',) + tuple(flat))))
         if self.spec_mode == 'spectrum':
             pos = self.player.pos if clip is not None else None
             if self.zoom in (None, 'spec') and not (pos is not None and pos == self.plot_pos.get('spec') and 'spec' in self.photos):

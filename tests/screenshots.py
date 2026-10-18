@@ -117,7 +117,14 @@ app.set_sel(HERO - 1.5, HERO + 2.5)
 app.seek_t(HERO)
 fit(root)
 pump(root, 1.2)
-grab(root).save(os.path.join(OUT, 'review.png'))
+shot = grab(root)
+# the vectorscope in this picture is a real capture of the scope playing an oscilloscope-music film (a little man with a mushroom head pats his dog, a rocket waits, the moon is up):
+# the picture of its panel (tests/vector_showcase.png) is pasted over the synthetic one, inside the panel's frame
+showcase = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'vector_showcase.png')
+if os.path.exists(showcase):
+    vx0, vy0, vx1, vy1 = app.P['vec']
+    shot.paste(Image.open(showcase).convert('RGB').resize((int(vx1 - vx0) - 1, int(vy1 - vy0) - 1), Image.LANCZOS), (int(vx0) + 1, int(vy0) + 1))
+shot.save(os.path.join(OUT, 'review.png'))
 print('review.png')
 
 use('Classic')

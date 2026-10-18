@@ -51,6 +51,20 @@ pump(root, 1.0)
 no_error('live')
 txt = app.c.itemcget(app.m_txt, 'text')
 check('live: the levels text has no LUFS line', 'LUFS' not in txt and 'short-term' not in txt and 'integrated' not in txt and txt.splitlines()[-1].startswith('clipped blocks') and 'flat-top' not in txt, txt.splitlines()[-1])
+lines_ = txt.splitlines()
+check('live: the levels text is hold, peak, session peak, clipped blocks (hold first, no unit letters)', [l_[:15].strip() for l_ in lines_] == ['hold', 'peak', 'session peak', 'clipped blocks'] and 'dBFS' not in txt, lines_)
+check('live: the figures of the two channels are in two columns (the labels padded, the numbers right-aligned), with blank places where the letters L and R go',
+      all(len(l_) == 35 and l_[15:18] == '   ' and l_[24:29] == '     ' and l_[18:24].strip() != '' and l_[29:35].strip() != '' for l_ in lines_) and 'L' not in txt and 'R' not in txt, lines_)
+from tkinter import font as tkfont_l
+mf_ = tkfont_l.Font(root=root, font=app.F(9))
+lr_items = {app.c.itemcget(i, 'text'): i for i in app.c.find_all() if app.c.type(i) == 'text' and app.c.itemcget(i, 'text') in (chr(10).join('LLLL'), chr(10).join('RRRR'))}
+tx_, ty_ = app.c.coords(app.m_txt)
+check('live: all the Ls are one column in the left channel colour and all the Rs one column in the right channel colour, in the blank places of the figures',
+      len(lr_items) == 2 and app.c.itemcget(lr_items[chr(10).join('LLLL')], 'fill') == app.CL and app.c.itemcget(lr_items[chr(10).join('RRRR')], 'fill') == app.CR
+      and abs(app.c.coords(lr_items[chr(10).join('LLLL')])[0] - (tx_ + mf_.measure(' ' * 16))) < 0.6 and abs(app.c.coords(lr_items[chr(10).join('RRRR')])[0] - (tx_ + mf_.measure(' ' * 27))) < 0.6
+      and abs(app.c.coords(lr_items[chr(10).join('LLLL')])[1] - ty_) < 0.6 and abs(app.c.coords(lr_items[chr(10).join('RRRR')])[1] - ty_) < 0.6, (lr_items, app.CL, app.CR))
+bal_line = app.c.itemcget(app.bal_lbl, 'text')
+check('live: the sign of the balance figure is in the column of the Ls above it', bal_line.startswith('balance') and bal_line.index(bal_line.split()[1]) == 16 and bal_line.endswith(' dB'), bal_line)
 bal_txt = app.c.itemcget(app.bal_lbl, 'text')
 bal_n = float(bal_txt.split()[1])
 bl, br = list(app.met_geom['bal'][0]), list(app.met_geom['bal'][1])
@@ -70,17 +84,24 @@ from tkinter import font as tkfont_
 nf_ = tkfont_.Font(root=root, font=app.F(8))
 wm_, w2_ = nf_.measure('-'), nf_.measure('48')
 bar_mid = (app.bar_xs[0] + app.bar_xs[1] + app.S(50)) / 2.0
-scale_x = {app.c.coords(i)[0] for i in app.c.find_all() if app.c.type(i) == 'text' and app.c.itemcget(i, 'text') in ('0', '6', '12', '24', '48') and app.c.itemcget(i, 'anchor') == 'w'}
-check('the level bars are centred on the balance bar; the first digits of the dB numbers between them (0, the 6 of -6, the 1 of -12 ...) are in one column, with the widest number centred on it',
-      abs(bar_mid - app.bal_x) <= 1 and len(scale_x) == 1 and abs(next(iter(scale_x)) - (app.bal_x - (wm_ + w2_) / 2.0 + wm_)) < 0.6, (bar_mid, app.bal_x, scale_x))
+labels = {app.c.itemcget(i, 'text'): app.c.coords(i) for i in app.c.find_all()
+          if app.c.type(i) == 'text' and app.c.itemcget(i, 'text') in ('0', '6', '12', '24', '48') and app.c.itemcget(i, 'anchor') == 'w'}
+col0 = app.bal_x - (wm_ + w2_) / 2.0 + wm_
+shift = {'12': 2, '24': 3, '48': 2}
+check('the level bars are centred on the balance bar; the first digits of the dB numbers 0 and -6 are in one column, with the widest number centred on it',
+      abs(bar_mid - app.bal_x) <= 1 and sorted(labels, key=int) == ['0', '6', '12', '24', '48'] and all(abs(labels[k][0] - col0) < 0.6 for k in ('0', '6')), (bar_mid, app.bal_x, labels))
+check('the gap between the two digits of -12, -24 and -48 is on the centre line of the balance bar (each number sits a hair left of the column)',
+      all(abs(labels[k][0] - (col0 - app.S(shift[k]))) < 0.6 and abs(labels[k][0] + nf_.measure(k[0]) - app.bal_x) <= app.S(1.6) for k in shift), {k: (labels[k][0], labels[k][0] + nf_.measure(k[0]), app.bal_x) for k in shift})
 ticks = {}
-for i in app.c.find_all():
-    if app.c.type(i) == 'text' and app.c.itemcget(i, 'text') in ('0', '6', '12', '24', '48') and app.c.itemcget(i, 'anchor') == 'w':
-        ticks[app.c.itemcget(i, 'text')] = (app.c.coords(i)[1], sorted(round(app.c.coords(j)[2 if app.c.coords(j)[0] < scale_x.copy().pop() else 0], 1) for j in app.c.find_all() if app.c.type(j) == 'line' and abs(app.c.coords(j)[1] - app.c.coords(i)[1]) < 0.01 and abs(app.c.coords(j)[3] - app.c.coords(i)[1]) < 0.01))
-minus = [i for i in app.c.find_all() if app.c.type(i) == 'text' and app.c.itemcget(i, 'text') == '-' and app.c.itemcget(i, 'anchor') == 'e']
-check('each dB number sits on its line (a line to the left and one to the right of it, the 0 line running on to the digit), the minus signs hang left of the column, and the lines are where the bars say that level is',
-      sorted(ticks) == sorted(['0', '6', '12', '24', '48']) and all(len(v[1]) == 2 for v in ticks.values()) and len(minus) == 4 and abs(ticks['6'][0] - ticks['0'][0] - 0.1 * app.bar_h) < 0.6 and abs(ticks['48'][0] - ticks['0'][0] - 0.8 * app.bar_h) < 0.6
-      and abs(ticks['0'][1][0] - (next(iter(scale_x)) - app.S(3))) < 0.6 and ticks['6'][1][0] < ticks['0'][1][0], ticks)
+for k, (lx_, ly_) in labels.items():
+    lines = sorted((round(app.c.coords(j)[0], 1), round(app.c.coords(j)[2], 1)) for j in app.c.find_all()
+                   if app.c.type(j) == 'line' and abs(app.c.coords(j)[1] - ly_) < 0.01 and abs(app.c.coords(j)[3] - ly_) < 0.01)
+    ticks[k] = (ly_, lines)
+minus = {round(app.c.coords(i)[1], 1): app.c.coords(i)[0] for i in app.c.find_all() if app.c.type(i) == 'text' and app.c.itemcget(i, 'text') == '-' and app.c.itemcget(i, 'anchor') == 'e'}
+check('each dB number sits on its line (a line to the left and one to the right of it, the 0 line running on to the digit), the minus signs hang left of their digits, and the lines are where the bars say that level is',
+      all(len(v[1]) == 2 for v in ticks.values()) and len(minus) == 4 and all(abs(minus[round(ticks[k][0], 1)] - labels[k][0]) < 0.6 for k in labels if k != '0')
+      and all(abs(ticks[k][1][0][1] - (labels[k][0] - app.S(3) - (wm_ if k != '0' else 0))) < 0.6 and abs(ticks[k][1][1][0] - (labels[k][0] + nf_.measure(k) + app.S(3))) < 0.6 for k in labels)
+      and abs(ticks['6'][0] - ticks['0'][0] - 0.1 * app.bar_h) < 0.6 and abs(ticks['48'][0] - ticks['0'][0] - 0.8 * app.bar_h) < 0.6, ticks)
 mx0, my0, mx1, my1 = app.P['met']
 txt_bb, lbl_bb = app.c.bbox(app.m_txt), app.c.bbox(app.bal_lbl)
 bars_bottom = app.bar_top + app.bar_h
@@ -556,6 +577,7 @@ for _ in m.THEMES:
                 pass
         return n
     check('theme %s: the 0 dB lines and their labels use its peak colour' % th.name, painted(th.peak) >= 4, painted(th.peak))
+    check('theme %s: the L and R letters of the levels text are in the left and right channel colours' % th.name, sorted(app.c.itemcget(i, 'fill') for i in app.c.find_all() if app.c.type(i) == 'text' and app.c.itemcget(i, 'text') in (chr(10).join('LLLL'), chr(10).join('RRRR'))) == sorted([app.CL, app.CR]) and (app.CL, app.CR) == (th.left, th.right), (app.CL, app.CR, th.left, th.right))
     check('theme %s: the level bars and the balance bars are drawn in the two channel colours' % th.name, app.plots['met'].plot.luts[0].tolist() == m.beam_palette(th.bg, th.left, light=True).tolist() and app.plots['met'].plot.luts[1].tolist() == m.beam_palette(th.bg, th.right, light=True).tolist(), th.name)
 check('cycling through every theme comes back to the first', app.th.name == first)
 app.cycle_theme()
