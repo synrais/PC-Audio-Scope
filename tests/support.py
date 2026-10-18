@@ -11,6 +11,7 @@ sys.path.insert(0, ROOT)
 
 import pc_audio_scope as m                  # noqa: E402
 from pc_audio_scope import SR, BLOCK        # noqa: E402
+m.App.THREADED = False                      # the graphs are drawn on the calling thread, so a test sees the picture at once (window_fit.py and beam.py test the threads)
 
 fails = []
 

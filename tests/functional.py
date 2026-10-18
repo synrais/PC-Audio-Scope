@@ -16,17 +16,23 @@ root.withdraw()
 app = m.App(root, cap)
 
 # ---- every documented key is bound
-keys = ['<space>', '<F5>', 'c', 'l', '<Control-o>', 'g', 'f', 'm', '<Delete>', '<Prior>', '<Next>', 'i', 'o', 'x', 'p', 'e', '1', '2', '3',
+keys = ['<space>', '<F5>', 'c', 'r', 'l', '<Control-o>', 'g', 'f', 'm', '<Delete>', '<Prior>', '<Next>', 'i', 'o', 'x', 'p', 'e', '1', '2', '3',
         '<Left>', '<Right>', '<Shift-Left>', '<Alt-Left>', '<Alt-Shift-Left>', '<Alt-Control-Left>', '<Home>', '<End>', 'q', '<Escape>']
 check('all documented keys are bound', all(root.bind(k) for k in keys), [k for k in keys if not root.bind(k)])
-check('the gain and reset controls are gone: their keys are unbound and nothing of them is left', not any(root.bind(k) for k in ('<plus>', '<equal>', '<minus>', 'a', 'r')) and not callable(getattr(app, 'zoom', None)) and not hasattr(app, 'b_auto') and not hasattr(app, 'auto'))
+check('the scope gain controls are gone: their keys are unbound and nothing of them is left', not any(root.bind(k) for k in ('<plus>', '<equal>', '<minus>', 'a')) and not callable(getattr(app, 'zoom', None)) and not hasattr(app, 'b_auto') and not hasattr(app, 'auto'))
 labels = []
 for w_ in app.controls.winfo_children():
     try:
         labels.append(str(w_.cget('text')))
     except tk.TclError:
         pass
-check('the controls row has no gain, auto gain, reset or Windows volume button', not [t_ for t_ in labels if 'gain' in t_.lower() or 'reset' in t_.lower() or 'volume' in t_.lower()] and not hasattr(app, 'b_comp'), labels)
+check('the controls row has no gain, auto gain or Windows volume button, and Reset peaks sits right after Theme', not [t_ for t_ in labels if 'gain' in t_.lower() or 'volume' in t_.lower()] and not hasattr(app, 'b_comp')
+      and [t_ for t_ in labels if t_.startswith('Theme')] and labels.index([t_ for t_ in labels if t_.startswith('Theme')][0]) + 1 == labels.index('Reset peaks  (R)'), labels)
+app.cap.sess = [0.5, 0.4]
+app.cap.flat = [3, 2]
+app.hold[:] = [-3.0, -4.0]
+app.b_reset.invoke()
+check('Reset peaks clears the session peaks, the clipped-block counts and the held peaks', list(app.cap.sess) == [0.0, 0.0] and list(app.cap.flat) == [0, 0] and list(app.hold) == [m.FLOOR, m.FLOOR], (app.cap.sess, app.cap.flat, app.hold))
 check('the levels are shown as measured by default (the C key can ignore the Windows volume)', app.comp is False and bool(root.bind('c')))
 T.mute_keys(root)
 
@@ -44,9 +50,16 @@ def no_error(tag):
 pump(root, 1.0)
 no_error('live')
 txt = app.c.itemcget(app.m_txt, 'text')
-check('live: LUFS line present', 'LUFS' in txt, txt.splitlines()[-1])
-check('live: correlation label present', 'correlation' in app.c.itemcget(app.cor_lbl, 'text'), app.c.itemcget(app.cor_lbl, 'text'))
-check('live: loudness line reads short-term / integrated', 'short-term' in txt and 'integrated' in txt, txt.splitlines()[-1])
+check('live: the levels text has no LUFS line', 'LUFS' not in txt and 'short-term' not in txt and 'integrated' not in txt and txt.splitlines()[-1].startswith('clipped blocks') and 'flat-top' not in txt, txt.splitlines()[-1])
+bal_txt = app.c.itemcget(app.bal_lbl, 'text')
+bal_n = float(bal_txt.split()[1])
+bl, br = list(app.met_geom['bal'][0]), list(app.met_geom['bal'][1])
+len_l, len_r = app.bal_x - bl[0], br[2] - app.bal_x
+check('the balance label is just "balance"', bal_txt.startswith('balance ') and 'L-R' not in bal_txt and 'R-L' not in bal_txt, bal_txt)
+check('the balance shows both channels at once: the left bar grows to the left of the centre, the right bar to the right, each by its own level', len_l > 0 and len_r > 0 and bl[2] == app.bal_x and br[0] == app.bal_x, (bl, br, app.bal_x))
+check('a positive balance figure means the left is louder, so its bar is the longer one', (bal_n > 0.05 and len_l > len_r) or (bal_n < -0.05 and len_r > len_l) or abs(bal_n) <= 0.05, (bal_txt, len_l, len_r))
+check('vectorscope: the picture of a beam screen is drawn from the sound', app.beam is not None and app.photos.get('vec') is not None and float(app.beam.buf.max()) > 0 and bool(app.c.itemcget(app.vec_item, 'image')), (app.beam is not None, app.photos.get('vec') is not None))
+check('live: no correlation meter any more', not hasattr(app, 'cor_lbl') and not hasattr(app, 'cor_mark') and not any('correlation' in app.c.itemcget(i, 'text') for i in app.c.find_all() if app.c.type(i) == 'text'))
 check('clip row hidden while live', app.clip_row.winfo_manager() == '' and app.cmp_row.winfo_manager() == '', (app.clip_row.winfo_manager(), app.cmp_row.winfo_manager()))
 
 # ---- input menu
@@ -73,7 +86,7 @@ need = ['Bass', 'Mids', 'Sub', '60-250', '500-2k', '6k-20k']
 check('spectrum: the equaliser ranges are named along the bottom', all(any(t_.startswith(n) or t_ == n for t_ in texts) for n in need), texts)
 px0, py0, px1, py1 = app.P['spec']
 check('spectrum: the names sit under the graph, and the traces stay inside it',
-      all(app.c.coords(i)[1] > py1 for i in app.c.find_withtag('spec') if app.c.type(i) == 'text' and app.c.itemcget(i, 'text') in need) and all(py0 - 1 <= y_ <= py1 + 1 for y_ in app.c.coords(app.s_l[0][0])[1::2]), (app.P['spec'],))
+      all(app.c.coords(i)[1] > py1 for i in app.c.find_withtag('spec') if app.c.type(i) == 'text' and app.c.itemcget(i, 'text') in need) and all(py0 - 1 <= y_ <= py1 + 1 for y_ in app.spec_pts[0][1]), (app.P['spec'],))
 def db_rows(tag):
     out = {}
     for i in app.c.find_withtag(tag):
@@ -84,11 +97,9 @@ rows_s, rows_h = db_rows('spec'), db_rows('hist')
 check('spectrum and level history: the same dB numbers on the same rows (they sit side by side)', len(rows_s) == 9 and {k: v[1] for k, v in rows_s.items()} == {k: v[1] for k, v in rows_h.items()}, (rows_s, rows_h))
 check('spectrum and level history: both graphs end on the -80 dB line, at the same row', abs(rows_s['-80 dB'][1] - py1) <= 1 and app.P['spec'][1::2] == app.P['hist'][1::2], (rows_s.get('-80 dB'), app.P['spec'], app.P['hist']))
 check('the dB numbers have their own column: left of every graph, so no trace can run through them', all(x_ < app.P['spec'][0] for x_, _ in rows_s.values()) and all(x_ < app.P['hist'][0] for x_, _ in rows_h.values()) and px0 > app.panel_frame['spec'][0] + app.S(30), (px0, app.panel_frame['spec']))
-main_s = [i for i, dy in app.s_l if dy == 0][0]
-main_h = [i for i, dy in app.h_l if dy == 0][0]
 app.draw_spectrum(np.zeros(4096), np.zeros(4096), 0.0)
 app.draw_history([(0.0, 0.0)] * 3100, 0.0, 4000)
-ys_s, ys_h = app.c.coords(main_s)[1::2], app.c.coords(main_h)[1::2]
+ys_s, ys_h = app.spec_pts[0][1], app.hist_pts[0][1]
 check('with no sound the spectrum and the level history both draw their line on the same bottom row', set(ys_s) == {float(py1)} and set(ys_h) == {float(py1)}, (sorted(set(ys_s))[:3], sorted(set(ys_h))[:3], py1))
 check('the spectrum and level history headers are plain', app.c.itemcget(app.spec_title, 'text') == 'SPECTRUM' and app.c.itemcget(app.hist_title, 'text') == 'LEVEL HISTORY', (app.c.itemcget(app.spec_title, 'text'), app.c.itemcget(app.hist_title, 'text')))
 pump(root, 0.3)
@@ -113,6 +124,7 @@ for name in ('osc', 'vec', 'spec', 'hist'):
     check('clicking the %s fills the scope area and the other panels are out of sight' % name, app.zoom == name and big and all(app.P[n][0] >= app.CW for n in others), (app.zoom, app.P))
     if name == 'vec':
         check('the zoomed vectorscope stays square', app.P['vec'][2] - app.P['vec'][0] == app.P['vec'][3] - app.P['vec'][1], app.P['vec'])
+        check('the zoomed vectorscope gets a bigger beam screen, drawn from the sound', app.beam is not None and 300 < app.beam.size <= 520 and float(app.beam.buf.max()) > 0, app.beam.size if app.beam else None)
     if name == 'spec':
         check('the zoomed spectrum still names its ranges under the graph', any(app.c.itemcget(i, 'text') == 'Bass' and app.c.coords(i)[1] > app.P['spec'][3] and app.c.coords(i)[0] < app.CW for i in app.c.find_withtag('spec') if app.c.type(i) == 'text'))
     app.scope_click(Ev0(x=app.S(300), y=app.S(300)))
@@ -361,7 +373,7 @@ hw = int(hx1 - hx0)
 def history_at(total):
     """the line the panel shows after `total` blocks: the absolute column of each vertex and the vertices"""
     app.draw_history(peaks[max(0, total - 3100):total], 0.0, total)
-    pts = np.array(app.c.coords(app.h_l[-1][0]), dtype=float).reshape(-1, 2)
+    pts = np.stack([app.hist_pts[0][0], app.hist_pts[0][1]], axis=1)
     newest = (total - 1) * hw // 3000 - 1  # the newest complete column sits at the right edge
     return newest - (hx1 - pts[:, 0]), pts
 
@@ -393,13 +405,33 @@ for start_gain in (1.0, 18.0, 400.0):
     app.gain = start_gain
     app.player.pos = 2 * m.SR - 300 + 4096  # the burst sits at 300 to 1500 of the 4096-sample window
     app.draw()
-    ys = np.array(app.c.coords(app.o_l[-1][0])).reshape(-1, 2)[:, 1]
+    ys = app.osc_pts[0][1]
     worst.append((round(float(ys.min()), 1), round(float(ys.max()), 1)))
 check('auto gain: a loud peak in the drawn part never runs into the edge of the scope', all(lo > oy0 + 1.5 and hi < oy1 - 1.5 for lo, hi in worst), (worst, (oy0, oy1)))
 app.gain = 1.0
 app.player.pos = 4 * m.SR  # a quiet part: the gain climbs gently instead of jumping
 app.draw()
 check('auto gain: it rises gently when the sound is quiet', 1.0 < app.gain < 5.0, app.gain)
+# the balance bars follow their own channel: a clip with sound in the left channel only
+only_left = np.stack([sig, np.zeros_like(sig)], axis=1)
+app.open_loaded(m.Clip(only_left, None, name='left only'))
+app.player.pos = 2 * m.SR + 4096
+for _ in range(40):
+    app.draw()
+bl, br = list(app.met_geom['bal'][0]), list(app.met_geom['bal'][1])
+check('left channel only: the left bar is long and the right bar has no length', app.bal_x - bl[0] > app.S(60) and br[2] - app.bal_x < 1, (bl, br, app.bal_x))
+rows = np.flatnonzero(app.beam.buf.sum(axis=1) > 0)
+mid_row = (app.beam.size - 1) / 2.0
+check('left channel only: the beam draws a horizontal line through the middle of the vectorscope', len(rows) and rows.min() >= mid_row - 1.5 and rows.max() <= mid_row + 1.5, (rows.min() if len(rows) else None, rows.max() if len(rows) else None, mid_row))
+held = float(app.beam.buf.sum())
+app.draw()
+check('with no new samples (paused) the vectorscope picture stays as it is', float(app.beam.buf.sum()) == held)
+app.open_loaded(m.Clip(only_left[:, ::-1].copy(), None, name='right only'))
+app.player.pos = 2 * m.SR + 4096
+for _ in range(40):
+    app.draw()
+bl, br = list(app.met_geom['bal'][0]), list(app.met_geom['bal'][1])
+check('right channel only: the right bar is long and the left bar has no length', br[2] - app.bal_x > app.S(60) and app.bal_x - bl[0] < 1, (bl, br, app.bal_x))
 app.go_live()
 
 # ---- finding problems in a clip: button, markers, panel, saved report, DC readout
@@ -443,11 +475,21 @@ check('DC readout: is highlighted when an offset is large', app.c.itemcget(app.d
 app.player.pos = 2 * m.SR
 app.frame = 0
 app.draw()
-check('DC readout: is quiet for a clean stretch', abs(app.dc_now[0]) < 3.0 and abs(app.dc_now[1]) < 3.0 and app.c.itemcget(app.dc_txt, 'fill') == app.th.dim, (app.dc_now, app.c.itemcget(app.dc_txt, 'fill')))
+check('DC readout: is hidden for a clean stretch', abs(app.dc_now[0]) < 1.0 and abs(app.dc_now[1]) < 1.0 and app.c.itemcget(app.dc_txt, 'text') == '', (app.dc_now, app.c.itemcget(app.dc_txt, 'text')))
+tt2 = np.arange(3 * m.SR) / float(m.SR)
+s2 = 0.3 * np.sin(2 * np.pi * 220 * tt2)
+for dc_amount, shown in ((0.005, False), (0.02, True)):
+    app.open_loaded(m.Clip(np.stack([s2 + dc_amount, s2], axis=1).astype(np.float32), None, name='dc %.1f' % (dc_amount * 100)))
+    app.player.pos = 2 * m.SR
+    app.frame = 0
+    app.draw()
+    txt = app.c.itemcget(app.dc_txt, 'text')
+    check('DC readout: %.1f %% is %s' % (dc_amount * 100, 'shown (and not red below 3 %)' if shown else 'hidden (under 1 %)'),
+          ('DC' in txt and app.c.itemcget(app.dc_txt, 'fill') == app.th.dim) if shown else txt == '', (txt, app.dc_now))
 app.go_live()
 app.frame = 0
 app.draw()
-check('DC readout: works on the live sound', 'DC' in app.c.itemcget(app.dc_txt, 'text'))
+check('DC readout: nothing to say about the live sound while it has no offset', app.c.itemcget(app.dc_txt, 'text') == '', (app.c.itemcget(app.dc_txt, 'text'), app.dc_now))
 
 # ---- themes
 def rgb(c):
@@ -475,8 +517,6 @@ for _ in m.THEMES:
     pump(root, 0.35)
     no_error('theme ' + app.th.name)
     th = app.th
-    cm = app.c.itemcget(app.cor_mark, 'fill')
-    check('theme %s: the correlation marker uses its colours' % th.name, cm in (th.good, th.mid, th.bad), cm)
     def painted(color):
         n = 0
         for item in app.c.find_all():
@@ -486,11 +526,11 @@ for _ in m.THEMES:
                 pass
         return n
     check('theme %s: the 0 dB lines and their labels use its peak colour' % th.name, painted(th.peak) >= 4, painted(th.peak))
-    bm = rgb(app.c.itemcget(app.bal_mark, 'fill'))
-    lo, hi = zip(*[sorted(pair) for pair in zip(rgb(th.left), rgb(th.right))])
-    check('theme %s: the balance marker is a blend of its two channel colours' % th.name, all(l_ - 2 <= v <= h_ + 2 for v, l_, h_ in zip(bm, lo, hi)), (bm, th.left, th.right))
+    check('theme %s: the level bars and the balance bars are drawn in the two channel colours' % th.name, app.plots['met'].plot.luts[0].tolist() == m.beam_palette(th.bg, th.left, light=True).tolist() and app.plots['met'].plot.luts[1].tolist() == m.beam_palette(th.bg, th.right, light=True).tolist(), th.name)
 check('cycling through every theme comes back to the first', app.th.name == first)
-check('a theme with glow draws each trace as a bright line with four dimmer ones around it', (app.cycle_theme() or True) and app.th.glow and len(app.o_l) == 5 and len(app.s_l) == 5 and len(app.h_r) == 5)
+app.cycle_theme()
+pump(root, 0.6)
+check('a theme with glow draws its graphs with a halo: the oscilloscope, spectrum and history screens are phosphor pictures at full glow', app.th.glow and all(app.plots[n_].plot.glow == 1.0 for n_ in ('osc', 'spec', 'hist')) and app.plots['hist'].plot.blend == 'max' and all(app.photos.get(n_) is not None for n_ in ('osc', 'spec', 'hist')), (app.th.name, sorted(app.plots), sorted(app.photos)))
 check('changing the theme prints no message (the change is obvious)', 'theme' not in app.lbl_msg.cget('text').lower(), app.lbl_msg.cget('text'))
 app.set_spec_mode('spectrogram')
 pump(root, 1.0)
@@ -501,7 +541,8 @@ check('the spectrogram palette follows the theme colour', tuple(lut[0]) == (0, 0
 app.theme_i = 0
 app.use_theme()
 app.build_ui()
-check('Classic has no glow', not app.th.glow and len(app.o_l) == 1)
+pump(root, 0.5)
+check('Classic keeps crisp lines: a weaker halo', not app.th.glow and all(app.plots[n_].plot.glow < 0.5 for n_ in ('osc', 'spec')), (app.th.glow, {n_: app.plots[n_].plot.glow for n_ in app.plots if n_ != 'vec'}))
 app.compare_start(ca, cb, auto=False)
 app.cycle_theme()
 pump(root, 0.5)

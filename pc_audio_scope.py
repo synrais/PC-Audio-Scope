@@ -8,6 +8,7 @@ import ctypes
 import json
 import math
 import os
+import queue
 import struct
 import sys
 import threading
@@ -274,12 +275,6 @@ def kweight_blocks(data):
 def lufs(energy):
     """loudness of a mean energy (BS.1770: -0.691 + 10 log10 of the summed channel mean squares)"""
     return FLOOR if energy <= 1e-12 else max(FLOOR, -0.691 + 10.0 * math.log10(energy))
-
-
-def short_term(ms, i=None):
-    """LUFS over the 3 s ending at block i"""
-    i = len(ms) if i is None else i
-    return lufs(float(np.mean(ms[max(0, i - 300):i]))) if i > 0 else FLOOR
 
 
 def integrated(ms, offset_db=0.0):
@@ -888,9 +883,247 @@ def draw_icon(n=256):
     return tile
 
 
+def beam_points(xy, step=0.8, limit=120000, power=1.0, max_bits=64):
+    """xy: (m, 2) pixel positions of consecutive samples.  Cuts every straight piece between two samples into bits of at most `step` pixels and gives each bit its share of that
+    sample's energy (1 / number of bits): a slow beam puts all of it on a few pixels, a fast one spreads it thin, so slow is bright and fast is dim, like the beam of a CRT.
+    `power` below 1 keeps fast pieces brighter than the physical 1 (the weight of a bit is n ** -power); useful for graphs that have to stay readable.
+    Returns (points (k, 2), weights (k,))"""
+    a, b = xy[:-1], xy[1:]
+    d = np.hypot(b[:, 0] - a[:, 0], b[:, 1] - a[:, 1])
+    n = np.clip(np.ceil(d / step), 1, max_bits).astype(np.int64)
+    if n.sum() > limit:  # a noisy signal: fewer bits, never more than the drawing can afford
+        n = np.maximum(1, (n * (limit / float(n.sum()))).astype(np.int64))
+    seg = np.repeat(np.arange(len(n)), n)
+    first = np.cumsum(n) - n
+    t = (np.arange(int(n.sum())) - np.repeat(first, n) + 0.5) / n[seg]
+    pts = a[seg] + (b - a)[seg] * t[:, None]
+    return pts, n[seg] ** -power
+
+
+def beam_splat(buf, pts, w):
+    """adds the weights w into the pixels around the points (each point is shared between its four neighbours), in place; points off the picture are dropped"""
+    h, wd = buf.shape
+    x, y = pts[:, 0], pts[:, 1]
+    keep = (x >= 0) & (x < wd - 1) & (y >= 0) & (y < h - 1)
+    x, y, w = x[keep], y[keep], w[keep]
+    if not len(x):
+        return
+    x0, y0 = x.astype(np.int64), y.astype(np.int64)
+    fx, fy = x - x0, y - y0
+    idx = y0 * wd + x0
+    flat = buf.reshape(-1)
+    lo, hi = int(idx.min()), int(idx.max()) + wd + 2  # only the stretch of the picture the points can touch is summed
+    part = np.bincount(np.concatenate([idx, idx + 1, idx + wd, idx + wd + 1]) - lo,
+                       weights=np.concatenate([w * (1 - fx) * (1 - fy), w * fx * (1 - fy), w * (1 - fx) * fy, w * fx * fy]), minlength=hi - lo)
+    flat[lo:hi] += part[:hi - lo]
+
+
+def rgbtuple(c):
+    return tuple(int(c[i:i + 2], 16) for i in (1, 3, 5))
+
+
+def beam_palette(bg, color, light=False):
+    """brightness 0..255 -> colour: the background, the colour, and white-hot at the brightest.  With light=True the colours are only what the beam adds to the background (0 for no
+    brightness), to be added over a picture of the background"""
+    b = np.array([int(bg[i:i + 2], 16) for i in (1, 3, 5)], np.float32)
+    c = np.array([int(color[i:i + 2], 16) for i in (1, 3, 5)], np.float32)
+    t = np.linspace(0.0, 1.0, 256, dtype=np.float32)[:, None]
+    body = b + (c - b) * np.minimum(1.0, t * 1.15)
+    hot = np.clip((t - 0.55) / 0.45, 0.0, 1.0) * 0.75
+    rgb = np.clip(body + (255.0 - body) * hot, 0, 255)
+    return np.clip(rgb - b, 0, 255).astype(np.uint8) if light else rgb.astype(np.uint8)
+
+
+class BeamScreen:
+    """a simulated phosphor screen of w x h pixels (square when h is left out, like the vectorscope's).  The samples are a path (see beam_points); their energy is added into a buffer
+    that fades by itself (persistence), and drawing it adds a soft glow around everything that is bright"""
+    TAU = 0.05  # seconds for the phosphor to fade to 1/e
+    EXPOSURE = 1.3
+
+    def __init__(self, w, h=None, tau=None, exposure=None):
+        self.w, self.h = int(w), int(h or w)
+        self.size = self.w
+        self.tau = self.TAU if tau is None else tau
+        self.exposure = self.EXPOSURE if exposure is None else exposure
+        self.buf = np.zeros((self.h, self.w), np.float32)
+
+    def clear(self):
+        self.buf[:] = 0.0
+
+    def add_path(self, xs, ys, dt, power=1.0, max_bits=64):
+        """the beam draws the path through the points (pixel positions, in time order) during dt seconds; the screen has faded for that long first"""
+        self.buf *= math.exp(-dt / self.tau)
+        if len(xs) < 2:
+            return
+        pts, w = beam_points(np.stack([np.asarray(xs, np.float64), np.asarray(ys, np.float64)], axis=1), power=power, max_bits=max_bits)
+        beam_splat(self.buf, pts, w)
+
+    def add(self, u, v, dt):
+        """u, v: consecutive samples of the left and right channel (-1 .. 1 is the whole screen), dt: the seconds they cover"""
+        hx, hy = (self.w - 1) / 2.0, (self.h - 1) / 2.0
+        self.add_path(hx * (1.0 + 0.96 * np.asarray(u, np.float64)), hy * (1.0 - 0.96 * np.asarray(v, np.float64)), dt)
+
+    def render(self, lut, glow=1.0):
+        """the screen as an RGB picture (glow: how strong the halo is, 0 for none).  Everything after the brightness is done on 8-bit pictures in the imaging library"""
+        from PIL import ImageChops, ImageFilter
+        x = self.buf * self.exposure
+        im = Image.fromarray(((x / (1.0 + x)) * 255.0).astype(np.uint8), 'L')  # brightness 0..255: grows quickly at first, then levels off
+        k = min(self.w, self.h) / 276.0
+        g1 = im.filter(ImageFilter.GaussianBlur(max(0.8, 1.4 * k))).point(_gain_table(0.8 * glow))
+        small = im.resize((max(8, self.w // 4), max(8, self.h // 4)), Image.Resampling.BOX).filter(ImageFilter.GaussianBlur(max(0.6, 1.5 * k)))
+        g2 = small.resize((self.w, self.h), Image.Resampling.BILINEAR).point(_gain_table(0.6 * glow))  # the wide glow is soft, so a quarter of the pixels do
+        out = ImageChops.add(ImageChops.add(im, g1), g2)
+        out.putpalette(lut.reshape(-1).tolist())
+        return out.convert('RGB')
+
+
+_GAIN_TABLES = {}
+
+
+def _gain_table(gain):
+    """a 256-entry table that multiplies a brightness by `gain`, stopping at 255"""
+    key = round(gain, 3)
+    if key not in _GAIN_TABLES:
+        _GAIN_TABLES[key] = [min(255, int(i * key)) for i in range(256)]
+    return _GAIN_TABLES[key]
+
+
+def plot_base(w, h, bg, grid, peak=None, rows=(), cols=(), bands=(), tint=None, middle=False, frame=True):
+    """the background picture of a graph (h, w, 3): the colour bg, tinted bands (pairs of x), vertical lines `cols`, a frame, a centre line and horizontal lines `rows`
+    (the first one in the colour `peak` when that is given)"""
+    def rgb(c):
+        return np.array([int(c[i:i + 2], 16) for i in (1, 3, 5)], np.uint8)
+    a = np.empty((h, w, 3), np.uint8)
+    a[:] = rgb(bg)
+    for x_a, x_b in bands:
+        a[:, max(0, x_a):max(0, x_b)] = rgb(tint)
+    g = rgb(grid)
+    if frame:
+        a[0, :] = g
+        a[-1, :] = g
+        a[:, 0] = g
+        a[:, -1] = g
+    for x in cols:
+        a[:, min(w - 1, max(0, x))] = g
+    if middle:
+        a[h // 2, :] = g
+    for i, y in enumerate(rows):
+        a[min(h - 1, max(0, y)), :] = rgb(peak) if (peak and i == 0) else g
+    return a
+
+
+class BeamPlot:
+    """a graph drawn like the vectorscope: a phosphor screen for each channel, added over a background picture (the grid) and shown as one picture.  Graphs wider than MAX_W are
+    drawn smaller and enlarged, which keeps a big graph fast"""
+    MAX_W = 700
+
+    def __init__(self, base, bg, colors, tau, exposure, power=1.0, max_bits=64, glow=1.0, blend='add'):
+        self.h, self.w = base.shape[:2]
+        self.f = min(1.0, self.MAX_W / float(self.w))
+        rw, rh = max(8, int(round(self.w * self.f))), max(8, int(round(self.h * self.f)))
+        self.screens = [BeamScreen(rw, rh, tau, exposure) for _ in range(2)]
+        self.luts = [beam_palette(bg, c, light=True) for c in colors]
+        self.base = Image.fromarray(base, 'RGB')
+        self.power, self.max_bits, self.glow, self.blend = power, max_bits, glow, blend  # blend: where the two channels overlap, 'add' their light (white-hot) or keep the 'max' of the two (each keeps its colour)
+
+    def clear(self):
+        for sc in self.screens:
+            sc.clear()
+
+    def add(self, ch, xs, ys, dt):
+        """channel ch draws the path through the points (pixel positions in the graph) during dt seconds"""
+        self.screens[ch].add_path(np.asarray(xs, np.float64) * self.f, np.asarray(ys, np.float64) * self.f, dt, self.power, self.max_bits)
+
+    def image(self):
+        from PIL import ImageChops
+        light = None
+        for sc, lut in zip(self.screens, self.luts):
+            im = sc.render(lut, self.glow)
+            light = im if light is None else (ImageChops.lighter(light, im) if self.blend == 'max' else ImageChops.add(light, im))
+        if self.f != 1.0:
+            light = light.resize((self.w, self.h), Image.Resampling.BILINEAR)  # one enlargement for both channels
+        return ImageChops.add(self.base, light)  # light added to the background, never past white
+
+
+class BeamVector:
+    """the vectorscope's screen with its palette: the new samples go in, a picture `side` pixels wide comes out"""
+
+    def __init__(self, size, side, lut):
+        self.screen = BeamScreen(size)
+        self.side, self.lut = side, lut
+
+    def image(self):
+        img = self.screen.render(self.lut)
+        return img if img.size[0] == self.side else img.resize((self.side, self.side), Image.Resampling.BILINEAR)
+
+
+class BeamWorker:
+    """draws one graph on a thread of its own, so the window never waits for it.  The owner hands it jobs (functions that put new data into the graph; they are run in order, and
+    everything that has piled up is drawn as one picture) and takes the newest finished picture.  Only the worker touches the graph.  Without a thread (threaded=False, for the
+    tests) a job is run and the picture made at once"""
+
+    def __init__(self, plot, threaded=True):
+        self.plot, self.threaded = plot, threaded
+        self.image, self.seq, self.taken, self.error = None, 0, 0, None
+        self.lock = threading.Lock()
+        self.jobs = queue.Queue()
+        self.thread = None
+        if threaded:
+            self.thread = threading.Thread(target=self._run, daemon=True)
+            self.thread.start()
+
+    def add(self, job):
+        if self.threaded:
+            self.jobs.put(job)
+        else:
+            job(self.plot)
+            self._draw()
+
+    def _draw(self):
+        img = self.plot.image()
+        with self.lock:
+            self.image, self.seq = img, self.seq + 1
+
+    def _run(self):
+        try:  # below the window's own thread, so the window is served first when every core is busy
+            ctypes.windll.kernel32.SetThreadPriority(ctypes.windll.kernel32.GetCurrentThread(), -1)
+        except Exception:
+            pass
+        while True:
+            job = self.jobs.get()
+            if job is None:
+                return
+            batch = [job]
+            try:
+                while True:
+                    batch.append(self.jobs.get_nowait())
+            except queue.Empty:
+                pass
+            if None in batch:
+                return
+            try:
+                for j in batch:
+                    j(self.plot)
+                self._draw()
+            except Exception:
+                self.error = traceback.format_exc()
+
+    def take(self):
+        """the picture made since the last call, or None"""
+        with self.lock:
+            if self.seq == self.taken:
+                return None
+            self.taken = self.seq
+            return self.image
+
+    def stop(self):
+        if self.threaded:
+            self.jobs.put(None)
+
+
 class Theme:
     """the colours of the window: a background, one colour for each channel and a tint for the text; the rest is blended from those"""
-    def __init__(self, name, bg, left, right, lname, rname, tint='#b8c4cc', accent='#4a90d9', vec=None, a=None, b=None, mark=None, on=None, spec=None, glow=True, good=None, mid=None, bad='#ffffff', live=None, peak=None):
+    def __init__(self, name, bg, left, right, lname, rname, tint='#b8c4cc', accent='#4a90d9', vec=None, a=None, b=None, mark=None, on=None, spec=None, glow=True, good=None, live=None, peak=None):
         self.name, self.bg, self.left, self.right, self.lname, self.rname = name, bg, left, right, lname, rname
         self.txt = tint
         self.fg = mix(tint, '#ffffff', 0.65)
@@ -910,8 +1143,7 @@ class Theme:
         self.accent_hi = mix(accent, '#ffffff', 0.45)
         self.on = on or mix(bg, accent, 0.6)
         self.vec = vec or left
-        self.trails = [mix(bg, self.vec, 0.25), mix(bg, self.vec, 0.55), self.vec]
-        self.good, self.mid, self.bad = good or self.vec, mid or right, bad  # correlation: mono-ish, wide, out of phase
+        self.good = good or self.vec
         self.live = live or self.good
         self.peak = peak or mix(left, '#ffffff', 0.45)  # the 0 dBFS lines and the clipped-block marks
         self.a, self.b = a or left, b or right  # clip A and clip B when comparing
@@ -923,7 +1155,7 @@ class Theme:
 
 
 THEMES = [
-    Theme('Classic', '#101418', '#ff5a4d', '#ffd23f', 'red', 'yellow', vec='#57e0a8', a='#ff8a7d', b='#7fd0ff', mark=('#ffb347', '#7fd0ff'), on='#2a6a8f', glow=False, good='#57e0a8', mid='#ffd23f', bad='#ff5a4d', live='#7bd88f', peak='#ff4040'),
+    Theme('Classic', '#101418', '#ff5a4d', '#ffd23f', 'red', 'yellow', vec='#57e0a8', a='#ff8a7d', b='#7fd0ff', mark=('#ffb347', '#7fd0ff'), on='#2a6a8f', glow=False, good='#57e0a8', live='#7bd88f', peak='#ff4040'),
     Theme('Green phosphor', '#030b06', '#2bff70', '#c4ffd6', 'green', 'pale green', tint='#8fe8ad', accent='#27c45f', spec='#2bff70'),
     Theme('Amber phosphor', '#0c0702', '#ffa31a', '#ffe6a8', 'amber', 'pale amber', tint='#f0c070', accent='#d98a14', spec='#ffa31a'),
     Theme('Blue phosphor', '#030812', '#3aa8ff', '#c4e6ff', 'blue', 'ice', tint='#8fc4f0', accent='#2f86e0', spec='#3aa8ff'),
@@ -1414,6 +1646,8 @@ def Button(master, **kw):
 class App:
     """the main window: a scope canvas, button rows and a timeline canvas; modes live | rec | review | compare; everything scales with self.k"""
     BASE_W, BASE_H, BASE_TH = 1240, 672, 188
+    THREADED = True  # the graphs are drawn on threads of their own (the tests switch it off)
+    HIST_OFFSETS = (-0.6, 0.0, 0.6)  # vertical offsets (pixels) the level history's line is drawn at: three passes a fraction of a pixel apart make a more solid line
     NUDGES = [('-1s', -1.0), ('-100ms', -0.1), ('-10ms', -0.01), ('-1ms', -0.001), ('+1ms', 0.001), ('+10ms', 0.01), ('+100ms', 0.1), ('+1s', 1.0)]
 
     def __init__(self, root, cap):
@@ -1425,7 +1659,11 @@ class App:
         self.spec_mode = s.get('spec_mode', 'spectrum')
         self.hold = [FLOOR, FLOOR]
         self.hold_t = [0.0, 0.0]
-        self.prev_vec = []
+        self.bal_lv = [FLOOR, FLOOR]  # the levels the balance bars show (dB)
+        self.beam, self.vec_last, self.vec_lut = None, None, None  # the vectorscope's screen, where it has drawn up to and its palette
+        self.work_ms = 0.0  # how long a frame takes to draw, smoothed: a slow computer draws the oscilloscope every other frame instead of falling behind
+        self.plots, self.photos, self.plot_pos, self.plot_time = {}, {}, {}, {}  # the other graphs' phosphor screens (made when first drawn), their pictures, where they have drawn up to and when
+        self.osc_pts = self.spec_pts = self.hist_pts = None  # what the graphs drew last, as canvas coordinates (one (xs, ys) per channel)
         self.mode = 'live'  # live | rec | review | compare
         self.clip = None
         self.cmp = None
@@ -1443,7 +1681,6 @@ class App:
         self.theme_i = next((i for i, t in enumerate(THEMES) if t.name == s.get('theme')), 0)
         self.use_theme()
         self.frame = 0
-        self.live_i = (0.0, None)
         self.cmp_result = None
         self.live_result = None
         self.view_user = False
@@ -1480,6 +1717,7 @@ class App:
             cap.set_source(src[0], src[1])
         root.protocol('WM_DELETE_WINDOW', self.quit)
         root.bind('<Configure>', self.on_configure)
+        self.fit_window()  # the scope's width and the height of what shows
         self.style_titlebar()
         root.after(300, self.style_titlebar)  # again once the window is on screen
         self.tick()
@@ -1540,6 +1778,7 @@ class App:
     def quit(self):
         self.save_settings()
         self.player.stop()
+        self.stop_plots()
         self.root.destroy()
 
     # --- building the window (everything scales with self.k) ---
@@ -1567,35 +1806,12 @@ class App:
         self.tl_key = None
         self.hist_key = None
         self.sg_photo = None
-        self.prev_vec = []
+        self.stop_plots()
         self._rows = None
         self.set_spec_mode(self.spec_mode)
         if self.mode == 'compare' and self.cmp:
             self.cmp_bounds()
         self.refresh_rows()
-
-    def trace(self, color, tags=()):
-        """a line; with a glowing theme also dimmer copies one and two pixels above and below it (a thick line is far too slow to draw); returns [(item, vertical offset)]"""
-        c, u = self.c, max(1, round(self.k))
-        ids = []
-        if self.th.glow:
-            for dy, strength in ((-2 * u, 0.16), (2 * u, 0.16), (-u, 0.45), (u, 0.45)):
-                ids.append((c.create_line(0, 0, 1, 1, fill=mix(self.BG, color, strength), tags=tags), dy))
-        ids.append((c.create_line(0, 0, 1, 1, fill=color, tags=tags), 0))
-        return ids
-
-    def plot(self, ids, pts):
-        if len(ids) == 1:
-            self.c.coords(ids[0][0], *pts)
-            return
-        arr = np.asarray(pts, dtype=float)
-        for item, dy in ids:
-            if dy:
-                shifted = arr.copy()
-                shifted[1::2] += dy
-                self.c.coords(item, *shifted.tolist())
-            else:
-                self.c.coords(item, *pts)
 
     def build_scope(self):
         S, c = self.S, self.c
@@ -1629,68 +1845,51 @@ class App:
         self.hist_title = t(10 if zoom == 'hist' else 625, 28 if zoom == 'hist' else 336, 'LEVEL HISTORY', hid('hist'))
         # oscilloscope
         x0, y0, x1, y1 = self.P['osc']
-        c.create_line(x0, (y0 + y1) / 2, x1, (y0 + y1) / 2, fill=self.GRID)
-        self.o_l = self.trace(self.CL)
-        self.o_r = self.trace(self.CR)
-        # vectorscope
+        self.osc_item = c.create_image(x0, y0, anchor='nw')  # the graph is a picture (see BeamPlot) with its grid baked in
+        # vectorscope: the beam is a picture (see BeamScreen) under the graticule
         x0, y0, x1, y1 = self.P['vec']
+        self.vec_item = c.create_image(x0 + 1, y0 + 1, anchor='nw')
+        self.vec_lut = beam_palette(self.BG, self.th.vec)
         cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
         c.create_line(x0, cy, x1, cy, fill=self.GRID)
         c.create_line(cx, y0, cx, y1, fill=self.GRID)
         c.create_line(x0, y1, x1, y0, fill=self.th.dash, dash=(3, 4))
         c.create_text(x1 - S(4), cy + S(3), text='L', fill=self.CL, font=self.F(9), anchor='ne')
         c.create_text(cx + S(4), y0 + S(3), text='R', fill=self.CR, font=self.F(9), anchor='nw')
-        self.v_halo = [c.create_line(0, 0, 1, 1, fill=mix(self.BG, self.th.vec, 0.3)) for _ in range(2)] if self.th.glow else None
-        self.v = [c.create_line(0, 0, 1, 1, fill=col) for col in self.th.trails]
         # meters (absolute positions; out of sight while a scope fills the area)
         x0, y0, x1, y1 = self.P['met']
         mx = away if zoom is not None else 0
         self.bal_x = S(1073) + mx
         self.bar_h = S(90)
+        self.bar_top = y0 + S(20)
         self.bar_xs = (S(946) + mx, S(1056) + mx)
-        self.m_bar = []
+        self.met_item = c.create_image(x0 + 1, y0 + 1, anchor='nw')  # the bars are a picture (see beam_plot): glowing, like the graphs
+        self.met_geom = None
         for i, xb in enumerate(self.bar_xs):
-            c.create_rectangle(xb, y0 + S(20), xb + S(50), y0 + S(20) + self.bar_h, outline=self.GRID)
-            bar = c.create_rectangle(xb, y0 + S(20) + self.bar_h, xb + S(50), y0 + S(20) + self.bar_h, fill=(self.CL, self.CR)[i], outline='')
-            hold = c.create_line(xb, y0 + S(20) + self.bar_h, xb + S(50), y0 + S(20) + self.bar_h, fill='white', width=2)
             c.create_text(xb + S(25), y0 + S(4), text='LR'[i], fill=(self.CL, self.CR)[i], font=self.F(10), anchor='n')
-            self.m_bar.append((bar, hold))
         for dd in (0, -6, -12, -24, -48):
             yy = y0 + S(20) + (-dd) / 60.0 * self.bar_h
             c.create_line(S(1010) + mx, yy, S(1044) + mx, yy, fill=(self.th.peak if dd == 0 else self.GRID))
             c.create_text(S(1027) + mx, yy - S(5), text='%d' % dd, fill=(self.th.peak if dd == 0 else self.TXT), font=self.F(8), anchor='n')
         self.m_txt = c.create_text(S(924) + mx, y0 + S(118), text='', fill=self.TXT, font=self.F(9), anchor='nw')
-        self.bal_y = y0 + S(214)
-        self.cor_y = y0 + S(254)
-        self.bal_lbl = c.create_text(S(924) + mx, self.bal_y - S(19), text='', fill=self.TXT, font=self.F(9), anchor='nw')
-        self.cor_lbl = c.create_text(S(924) + mx, self.cor_y - S(19), text='', fill=self.TXT, font=self.F(9), anchor='nw')
-        for yy in (self.bal_y, self.cor_y):
-            c.create_line(S(934) + mx, yy, S(1212) + mx, yy, fill=self.GRID)
-            c.create_line(self.bal_x, yy - S(7), self.bal_x, yy + S(7), fill=self.GRID)
-        c.create_text(S(934) + mx, self.bal_y + S(8), text='LEFT', fill=self.CL, font=self.F(8), anchor='nw')
-        c.create_text(S(1212) + mx, self.bal_y + S(8), text='RIGHT', fill=self.CR, font=self.F(8), anchor='ne')
-        c.create_text(S(934) + mx, self.cor_y + S(8), text='-1 opposite', fill=self.TXT, font=self.F(8), anchor='nw')
-        c.create_text(S(1212) + mx, self.cor_y + S(8), text='+1 mono', fill=self.TXT, font=self.F(8), anchor='ne')
-        self.bal_mark = c.create_rectangle(self.bal_x, self.bal_y - S(6), self.bal_x, self.bal_y + S(6), fill=self.th.good, outline='')
-        self.cor_mark = c.create_rectangle(self.bal_x, self.cor_y - S(6), self.bal_x, self.cor_y + S(6), fill=self.th.good, outline='')
+        self.bal_y = y0 + S(240)  # the balance bar; the figure and the LEFT / RIGHT words are above it
+        self.bal_lbl = c.create_text(S(924) + mx, self.bal_y - S(40), text='', fill=self.TXT, font=self.F(9), anchor='nw')
+        c.create_text(S(934) + mx, self.bal_y - S(22), text='LEFT', fill=self.CL, font=self.F(8), anchor='nw')
+        c.create_text(S(1212) + mx, self.bal_y - S(22), text='RIGHT', fill=self.CR, font=self.F(8), anchor='ne')
         # spectrum (tag 'spec') and spectrogram (tag 'sg')
         x0, y0, x1, y1 = self.P['spec']
         sfont = tkfont.Font(root=self.root, font=self.F(8))
         for i, (lo, hi, names, rng) in enumerate(EQ_BANDS):  # the ranges an equaliser uses: tinted bands through the graph, their names under it
             a, b_ = self.fx(max(lo, 30)), self.fx(hi)
-            if i % 2:
-                c.create_rectangle(a, y0 + 1, b_ - 1, y1, fill=mix(self.BG, self.th.fg, 0.05), outline='', tags='spec')
-            if lo > 30:
-                c.create_line(a, y0, a, y1 + S(30), fill=self.GRID, tags='spec')
+            if lo > 30:  # the bands and their dividers inside the graph are in its picture; the dividers go on under it, between the names
+                c.create_line(a, y1, a, y1 + S(30), fill=self.GRID, tags='spec')
             name = next((n for n in names if sfont.measure(n) <= b_ - a - S(4)), names[-1])
             c.create_text((a + b_) / 2, y1 + S(4), text=name, fill=self.th.fg, font=self.F(8), anchor='n', tags='spec')
             c.create_text((a + b_) / 2, y1 + S(17), text=rng, fill=self.TXT, font=self.F(8), anchor='n', tags='spec')
         for dd in DB_LINES:
             yy = y0 + (-dd) / DB_RANGE * (y1 - y0)
-            c.create_line(x0, yy, x1, yy, fill=(self.th.peak if dd == 0 else self.GRID), tags='spec')
             c.create_text(x0 - S(5), yy + S(1) if dd == 0 else yy, text='%d dB' % dd, fill=(self.th.peak if dd == 0 else self.TXT), font=self.F(8), anchor='ne' if dd == 0 else 'e', tags='spec')
-        self.s_l = self.trace(self.CL, 'spec')
-        self.s_r = self.trace(self.CR, 'spec')
+        self.spec_item = c.create_image(x0, y0, anchor='nw', tags='spec')
         self.sg_item = c.create_image(x0 + 1, y0 + 1, anchor='nw', tags='sg')
         self.sg_head = c.create_line(-10, y0, -10, y1, fill='white', tags='sg')
         for f in (100, 1000, 10000):
@@ -1700,10 +1899,8 @@ class App:
         x0, y0, x1, y1 = self.P['hist']
         for dd in DB_LINES:
             yy = y0 + (-dd) / DB_RANGE * (y1 - y0)
-            c.create_line(x0, yy, x1, yy, fill=(self.th.peak if dd == 0 else self.GRID), tags='hist')
             c.create_text(x0 - S(5), yy + S(1) if dd == 0 else yy, text='%d dB' % dd, fill=(self.th.peak if dd == 0 else self.TXT), font=self.F(8), anchor='ne' if dd == 0 else 'e', tags='hist')
-        self.h_l = self.trace(self.CL, 'hist')
-        self.h_r = self.trace(self.CR, 'hist')
+        self.hist_item = c.create_image(x0, y0, anchor='nw', tags='hist')
         self.cmp_txt = c.create_text(self.panel_frame['hist'][0] + S(10), y0 + S(8), text='', fill=self.th.fg, font=self.F(10), anchor='nw', tags='cmp')
 
     def scope_hit(self, x, y):
@@ -1734,7 +1931,7 @@ class App:
         self.build_scope()
         self.hist_key = None
         self.sg_photo = None
-        self.prev_vec = []
+        self.stop_plots()
         self.set_spec_mode(self.spec_mode)
         self.draw()
 
@@ -1759,6 +1956,7 @@ class App:
             self.mb_src.config(menu=self.src_menu)
         self.b_spec = mk('Spectrogram  (G)', lambda: self.set_spec_mode('spectrogram' if self.spec_mode == 'spectrum' else 'spectrum'))
         mk('Theme  (T)', self.cycle_theme)
+        self.b_reset = mk('Reset peaks  (R)', self.reset_peaks)
         self.controls = f
 
     def pop_src_menu(self):
@@ -1838,7 +2036,8 @@ class App:
             if self.root.state() != 'normal':
                 return
             self.root.update_idletasks()
-            self.root.geometry('%dx%d' % (max(self.root.winfo_width(), self.root.winfo_reqwidth()), self.root.winfo_reqheight()))
+            w = self.root.winfo_width()  # the width stays what it is (the scope's own width before the window is on screen): a long message in a row must not widen the window
+            self.root.geometry('%dx%d' % (w if w > 200 else self.CW, self.root.winfo_reqheight()))
         except tk.TclError:
             pass
 
@@ -1924,6 +2123,7 @@ class App:
         kb('<space>', lambda: self.play_toggle() if self.mode in ('review', 'compare') else setattr(self, 'paused', not self.paused))
         kb('<F5>', self.rec_toggle, True)
         kb('c', lambda: setattr(self, 'comp', not self.comp))
+        kb('r', self.reset_peaks)
         kb('l', self.go_live)
         kb('<Control-o>', self.open_clip, True)
         if MACOS:
@@ -2924,6 +3124,7 @@ class App:
 
     # --- main loop ---
     def tick(self):
+        t0 = time.perf_counter()
         try:
             self.frame += 1
             self.cmp_poll()
@@ -2934,7 +3135,9 @@ class App:
                 self.draw()
         except Exception:
             self.c.itemconfig(self.status, text='drawing error: ' + traceback.format_exc().splitlines()[-1])
-        self.root.after(33, self.tick)
+        spent = (time.perf_counter() - t0) * 1000.0
+        self.work_ms += (spent - self.work_ms) * 0.1
+        self.root.after(max(1, int(33 - spent)), self.tick)  # 30 frames a second however long a frame took to draw (as long as it took less than 33 ms)
 
     def update_transport(self):
         self.update_source_button()
@@ -2988,28 +3191,11 @@ class App:
         tgt = min(1000.0, 0.9 / max(pk, 1e-4))
         self.gain = tgt if tgt < self.gain else self.gain + (tgt - self.gain) * 0.15
         g = self.gain
-        # oscilloscope (rising-edge trigger on the left channel)
-        x0, y0, x1, y1 = self.P['osc']
-        xs = np.linspace(x0, x1, n)
-        ym, hh = (y0 + y1) / 2, (y1 - y0) / 2 - 4
-        for item, ch in ((self.o_l, L), (self.o_r, R)):
-            ys = np.clip(ym - ch[s:s + n] * g * hh, y0 + 1, y1 - 1)
-            self.plot(item, np.stack([xs, ys], axis=1).ravel().tolist())
-        # vectorscope
-        x0, y0, x1, y1 = self.P['vec']
-        cx, cy, r = (x0 + x1) / 2, (y0 + y1) / 2, min(x1 - x0, y1 - y0) / 2 - 4
-        m = 800
-        px = np.clip(cx + L[-m:] * g * r, x0 + 1, x1 - 1)
-        py = np.clip(cy - R[-m:] * g * r, y0 + 1, y1 - 1)
-        pts = np.stack([px, py], axis=1).ravel().tolist()
-        self.prev_vec = (self.prev_vec + [pts])[-3:]
-        for item, p in zip(self.v[-len(self.prev_vec):], self.prev_vec):
-            c.coords(item, *p)
-        if self.v_halo:
-            arr = np.asarray(pts, dtype=float)
-            for item, d in zip(self.v_halo, (1.5, -1.5)):
-                c.coords(item, *(arr + d).tolist())
-        # levels, loudness
+        if self.zoom in (None, 'osc') and (self.work_ms < 26.0 or self.frame % 2 == 0):
+            self.draw_osc(L, R, s, n, g, clip)
+        if self.zoom in (None, 'vec'):
+            self.draw_vector(x, g, clip)
+        # levels
         tnow = time.time()
         if clip is not None:
             v = (clip.vol_db, None, False) if clip.vol_db is not None else None
@@ -3018,9 +3204,6 @@ class App:
             hist = [tuple(h) for h in clip.peaks[max(0, b - 10):b]]
             sess = [float(clip.peaks[:b, 0].max()), float(clip.peaks[:b, 1].max())]
             flat = [int(clip.flat[:b, 0].sum()), int(clip.flat[:b, 1].sum())]
-            ms_all = clip.ms
-            sht = short_term(ms_all, b) + cd
-            li = clip.integrated(cd)
             devtxt = 'clip: ' + (clip.name or '?')
         else:
             cv = cap.vol
@@ -3030,14 +3213,6 @@ class App:
                 hist = [cap.hist[i] for i in range(-min(10, len(cap.hist)), 0)]
                 sess = list(cap.sess)
                 flat = list(cap.flat)
-                tail = list(cap.ms[-300:])
-            ms_all = np.array(tail)
-            sht = short_term(ms_all) + cd
-            if tnow - self.live_i[0] > 0.5:
-                with cap.lock:
-                    arr = np.array(cap.ms)
-                self.live_i = (tnow, integrated(arr, cd))
-            li = self.live_i[1]
             devtxt = cap.device + ((' - ' + cap.warn) if cap.warn else '')
         recent = hist[-10:] or [(0.0, 0.0)]
         now_pk = [max(h[i] for h in recent) for i in (0, 1)]
@@ -3045,40 +3220,39 @@ class App:
         if self.frame % 3 == 0:  # the average sample over the last second, per channel: loudness figures cannot see this
             second = clip.data[max(0, self.player.pos - SR):max(1, self.player.pos)] if clip is not None else cap.last(SR)
             self.dc_now = [100.0 * float(second[:, i].mean()) * 10 ** (cd / 20.0) for i in (0, 1)] if len(second) else [0.0, 0.0]
-        c.itemconfig(self.dc_txt, text='DC  L %+.1f%%  R %+.1f%%' % tuple(self.dc_now), fill=(self.th.peak if max(abs(self.dc_now[0]), abs(self.dc_now[1])) > 3.0 else self.th.dim))
+        worst_dc = max(abs(self.dc_now[0]), abs(self.dc_now[1]))  # shown only from 1 %: a clean signal has none, so the readout would only ever say 0.0
+        c.itemconfig(self.dc_txt, text=('DC  L %+.1f%%  R %+.1f%%' % tuple(self.dc_now)) if worst_dc >= 1.0 else '', fill=(self.th.peak if worst_dc > 3.0 else self.th.dim))
         x0, y0, x1, y1 = self.P['met']
+        bars, holds = [], []
         for i in (0, 1):
             if dbn[i] >= self.hold[i] or tnow - self.hold_t[i] > 1.5:
                 self.hold[i], self.hold_t[i] = dbn[i], tnow
             xb = self.bar_xs[i]
-            top = y0 + S(20) + min(1.0, max(0.0, -dbn[i] / 60.0)) * self.bar_h
-            bar, hold = self.m_bar[i]
-            c.coords(bar, xb, top, xb + S(50), y0 + S(20) + self.bar_h)
-            hy = y0 + S(20) + min(1.0, max(0.0, -self.hold[i] / 60.0)) * self.bar_h
-            c.coords(hold, xb, hy, xb + S(50), hy)
+            bars.append((xb, self.bar_top + min(1.0, max(0.0, -dbn[i] / 60.0)) * self.bar_h, xb + S(50), self.bar_top + self.bar_h))
+            holds.append(self.bar_top + min(1.0, max(0.0, -self.hold[i] / 60.0)) * self.bar_h)
         rms = [math.sqrt(float(np.mean(x[-9600:, i] ** 2))) for i in (0, 1)]
-        bal = (db(rms[1]) - db(rms[0])) if (rms[0] > 1e-7 and rms[1] > 1e-7) else 0.0
-        bx = self.bal_x + max(-12.0, min(12.0, bal)) / 12.0 * S(120)
-        c.coords(self.bal_mark, min(self.bal_x, bx), self.bal_y - S(6), max(self.bal_x, bx) + 2, self.bal_y + S(6))
-        c.itemconfig(self.bal_mark, fill=mix(self.th.left, self.th.right, (max(-12.0, min(12.0, bal)) + 12.0) / 24.0))
-        c.itemconfig(self.bal_lbl, text='balance R-L  %+.1f dB' % bal)
-        cor = correlation(x[-9600:, 0], x[-9600:, 1])
-        if cor is None:
-            c.coords(self.cor_mark, self.bal_x, self.cor_y - S(6), self.bal_x, self.cor_y + S(6))
-            c.itemconfig(self.cor_lbl, text='correlation  --')
-        else:
-            cxp = self.bal_x + cor * S(120)
-            c.coords(self.cor_mark, min(self.bal_x, cxp), self.cor_y - S(6), max(self.bal_x, cxp) + 2, self.cor_y + S(6))
-            c.itemconfig(self.cor_mark, fill=(self.th.good if cor > 0.5 else (self.th.mid if cor > 0 else self.th.bad)))
-            c.itemconfig(self.cor_lbl, text='correlation  %+.2f   %s' % (cor, 'mono-ish' if cor > 0.8 else ('wide stereo' if cor > 0.2 else ('unrelated' if cor > -0.2 else 'OUT OF PHASE'))))
-        fm = lambda v_: ('%.1f' % v_) if (v_ is not None and v_ > -100) else '--'
+        # balance: both channels at once, from the centre outwards: the left level grows to the left, the right level to the right (same 60 dB scale as the peak bars).
+        # The levels rise at once and fall over about a sixth of a second, so the bars do not flicker
+        for i in (0, 1):
+            now = db(rms[i]) + cd
+            self.bal_lv[i] = now if now > self.bal_lv[i] else self.bal_lv[i] + (now - self.bal_lv[i]) * 0.2
+        half = S(139)
+        lens = [min(1.0, max(0.0, (60.0 + v_) / 60.0)) * half for v_ in self.bal_lv]
+        bal_rects = [(self.bal_x - lens[0], self.bal_y - S(5), self.bal_x, self.bal_y + S(5)), (self.bal_x, self.bal_y - S(5), self.bal_x + lens[1], self.bal_y + S(5))]
+        self.met_geom = {'bars': bars, 'hold': holds, 'bal': bal_rects}  # canvas coordinates
+        if self.zoom is None:
+            self.draw_bars(x0 + 1, y0 + 1)
+        bal = (self.bal_lv[1] - self.bal_lv[0]) if min(self.bal_lv) > -100 else 0.0
+        c.itemconfig(self.bal_lbl, text='balance  %+.1f dB' % (-bal + 0.0))  # positive: the left channel is louder (its bar is the longer)
         c.itemconfig(self.m_txt, text=('peak  L %6.1f   R %6.1f dBFS\n' % tuple(dbn) +
                                        'hold  L %6.1f   R %6.1f\n' % tuple(self.hold) +
                                        '%s  L %5.1f  R %5.1f\n' % ('clip peak' if clip is not None else 'session peak', db(sess[0]) + cd, db(sess[1]) + cd) +
-                                       'flat-top (clipped) blocks  L %d  R %d\n' % tuple(flat) +
-                                       'LUFS  short-term %s   integrated %s' % (fm(sht), fm(li))))
+                                       'clipped blocks  L %d  R %d' % tuple(flat)))
         if self.spec_mode == 'spectrum':
-            self.draw_spectrum(L, R, cd)
+            pos = self.player.pos if clip is not None else None
+            if self.zoom in (None, 'spec') and not (pos is not None and pos == self.plot_pos.get('spec') and 'spec' in self.photos):
+                self.plot_pos['spec'] = pos
+                self.draw_spectrum(L, R, cd)
         elif self.frame % 3 == 0:
             self.draw_spectrogram(clip, cd)
         in_cmp = self.mode == 'compare'
@@ -3109,6 +3283,156 @@ class App:
         if self.sel and self.frame % 10 == 0 and self.mode in ('review', 'compare'):
             self.msg(self.sel_stats_text())
 
+    def stop_plots(self):
+        """ends the threads of the graphs; they are made again when they are next drawn (after a theme change, a zoom or a resize)"""
+        for wk in self.plots.values():
+            wk.stop()
+        self.plots, self.photos, self.plot_pos = {}, {}, {}
+        self.beam, self.vec_last = None, None
+
+    def beam_plot(self, name):
+        """the BeamPlot of the oscilloscope ('osc'), the spectrum ('spec') or the level history ('hist'): made when it is first needed, and again after a theme change, a zoom or a resize"""
+        wk = self.plots.get(name)
+        if wk is not None:
+            return wk
+        x0, y0, x1, y1 = self.P[name]
+        w, h = int(x1 - x0) + 1, int(y1 - y0) + 1
+        th = self.th
+        glow = 1.0 if th.glow else 0.35  # the Classic theme keeps crisp lines
+        colors = (th.left, th.right)
+        rows = [int(round(i * (h - 1) / float(len(DB_LINES) - 1))) for i in range(len(DB_LINES))]
+        if name == 'osc':
+            pl = BeamPlot(plot_base(w, h, th.bg, th.grid, middle=True), th.bg, colors, 0.025, 1.3, 0.35, 64, glow)
+        elif name == 'spec':
+            bands, cols = [], []
+            for i, (lo, hi, _names, _rng) in enumerate(EQ_BANDS):
+                a, b_ = int(round(self.fx(max(lo, 30)) - x0)), int(round(self.fx(hi) - x0))
+                if i % 2:
+                    bands.append((a, b_))
+                if lo > 30:
+                    cols.append(a)
+            pl = BeamPlot(plot_base(w, h, th.bg, th.grid, th.peak, rows, cols, bands, mix(th.bg, th.fg, 0.05)), th.bg, colors, 0.04, 3.2, 0.25, 64, glow)
+        elif name == 'met':
+            wm, hm = int(x1 - x0) - 1, int(y1 - y0) - 1  # the picture is one pixel inside the panel's frame
+            a = plot_base(wm, hm, th.bg, th.grid, frame=False)
+            g = np.array(rgbtuple(th.grid), np.uint8)
+            for xb in self.bar_xs:  # the frames of the two level bars
+                xa, ya, xz, yz = int(xb - x0 - 1), int(self.bar_top - y0 - 1), int(xb + self.S(50) - x0 - 1), int(self.bar_top + self.bar_h - y0 - 1)
+                a[ya, xa:xz + 1] = g
+                a[yz, xa:xz + 1] = g
+                a[ya:yz + 1, xa] = g
+                a[ya:yz + 1, xz] = g
+            by, cx, half = int(self.bal_y - y0 - 1), int(self.bal_x - x0 - 1), self.S(139)
+            a[by, cx - half:cx + half + 1] = g  # the balance bar's baseline and centre mark
+            a[by - self.S(7):by + self.S(7) + 1, cx] = g
+            pl = BeamPlot(a, th.bg, colors, 0.05, 1.3, 1.0, 64, glow)
+        else:  # a level history has to keep its dips visible, so a fast stroke is not dimmed (power 0)
+            pl = BeamPlot(plot_base(w, h, th.bg, th.grid, th.peak, rows), th.bg, colors, 0.05, 0.32, 0.0, 200, glow, 'max')  # where the two channels overlap each keeps its colour instead of burning out to white
+        wk = self.plots[name] = BeamWorker(pl, self.THREADED)
+        return wk
+
+    def show_plot(self, name, item, wk):
+        """puts the newest finished picture of a graph on the canvas (if there is a new one)"""
+        if wk.error:
+            raise RuntimeError(wk.error.strip().splitlines()[-1])
+        img = wk.take()
+        if img is None:
+            return
+        photo = self.photos.get(name)
+        if photo is not None and (photo.width(), photo.height()) == img.size:
+            photo.paste(img)  # the same Tk picture, new pixels
+        else:
+            self.photos[name] = ImageTk.PhotoImage(img)
+            self.c.itemconfig(item, image=self.photos[name])
+
+    def frame_dt(self, name):
+        """the seconds since this graph was last drawn (between 16 and 100 ms): how long its phosphor has been fading"""
+        now = time.time()
+        dt = min(0.1, max(0.016, now - self.plot_time.get(name, now - 0.033)))
+        self.plot_time[name] = now
+        return dt
+
+    def draw_osc(self, L, R, s, n, g, clip):
+        """the oscilloscope (rising-edge trigger on the left channel): the stretch is added to each channel's phosphor screen.  A paused recording keeps its picture"""
+        x0, y0, x1, y1 = self.P['osc']
+        pos = self.player.pos if clip is not None else None
+        wk = self.beam_plot('osc')
+        if pos is not None and pos == self.plot_pos.get('osc') and 'osc' in self.photos:
+            return
+        self.plot_pos['osc'] = pos
+        dt = self.frame_dt('osc')
+        w, h = x1 - x0, y1 - y0
+        xs = np.linspace(0.0, w, n)
+        self.osc_pts, paths = [], []
+        for d in (L, R):
+            ys = np.clip(h / 2.0 - d[s:s + n] * g * (h / 2.0 - 4), 1.0, h - 1.0)
+            paths.append((xs, ys))
+            self.osc_pts.append((xs + x0, ys + y0))
+        wk.add(lambda pl: [pl.add(ch, a[0], a[1], dt) for ch, a in enumerate(paths)])
+        self.show_plot('osc', self.osc_item, wk)
+
+    def draw_vector(self, x, g, clip):
+        """the vectorscope: the samples since the last frame are added to the beam screen (left across, right up) and its picture is shown"""
+        x0, y0, x1, y1 = self.P['vec']
+        side = int(min(x1 - x0, y1 - y0)) - 2
+        size = max(64, min(side, 520))
+        wk = self.plots.get('vec')
+        if wk is None or wk.plot.screen.size != size or wk.plot.side != side:
+            self.stop_plot('vec')
+            wk = self.plots['vec'] = BeamWorker(BeamVector(size, side, self.vec_lut), self.THREADED)
+            self.beam, self.vec_last = wk.plot.screen, None
+        pos = self.player.pos if clip is not None else self.cap.pos
+        new = None if self.vec_last is None else pos - self.vec_last
+        clear = False
+        if new is None or new < 0 or new > 4000:  # the first frame, or a jump: start again from the last 1600 samples
+            clear, new = True, 1600
+        elif new == 0:  # paused: the picture stays
+            self.show_plot('vec', self.vec_item, wk)
+            return
+        self.vec_last = pos
+        seg = x[-(new + 1):]  # the first is the last sample of the previous frame, so the path goes on without a gap
+        u, v, dt = seg[:, 0] * g, seg[:, 1] * g, new / float(SR)
+
+        def job(pl):
+            if clear:
+                pl.screen.clear()
+            pl.screen.add(u, v, dt)
+        wk.add(job)
+        self.show_plot('vec', self.vec_item, wk)
+
+    def draw_bars(self, ox, oy):
+        """the level bars, their hold lines and the balance bars: each channel's light (a dim fill, a white-hot edge, a glow around it) is put into its screen; ox, oy: where the picture
+        starts on the canvas"""
+        wk = self.beam_plot('met')
+        geom = self.met_geom
+        R = lambda v, o: int(round(v)) - int(o)
+        spans = []
+        for i in (0, 1):
+            bx0, ty, bx1, by = (R(geom['bars'][i][0], ox), R(geom['bars'][i][1], oy), R(geom['bars'][i][2], ox), R(geom['bars'][i][3], oy))
+            rx0, ry0, rx1, ry1 = (R(geom['bal'][i][0], ox), R(geom['bal'][i][1], oy), R(geom['bal'][i][2], ox), R(geom['bal'][i][3], oy))
+            spans.append((bx0, ty, bx1, by, R(geom['hold'][i], oy), rx0, ry0, rx1, ry1))
+
+        def job(pl):
+            for i, (bx0, ty, bx1, by, hy, rx0, ry0, rx1, ry1) in enumerate(spans):
+                buf = pl.screens[i].buf
+                buf[:] = 0.0
+                if by - ty > 1:
+                    buf[ty:by, bx0 + 1:bx1] = 0.22  # the fill (dim: the glow adds to it, and over a whole bar it would otherwise turn white)
+                    buf[ty:ty + 2, bx0 + 1:bx1] = 6.0  # the white-hot edge
+                buf[max(0, hy - 1):hy + 1, bx0:bx1 + 1] = 10.0  # the hold line
+                if rx1 - rx0 > 1:
+                    buf[ry0:ry1, rx0:rx1] = 0.22
+                    edge = slice(rx0, rx0 + 2) if i == 0 else slice(rx1 - 2, rx1)
+                    buf[ry0:ry1, edge] = 6.0
+        wk.add(job)
+        self.show_plot('met', self.met_item, wk)
+
+    def stop_plot(self, name):
+        wk = self.plots.pop(name, None)
+        if wk is not None:
+            wk.stop()
+        self.photos.pop(name, None)
+
     def draw_spectrum(self, L, R, cd):
         c = self.c
         x0, y0, x1, y1 = self.P['spec']
@@ -3116,15 +3440,23 @@ class App:
         wsum = win.sum()
         fr = np.fft.rfftfreq(4096, 1.0 / SR)
         edges = np.logspace(math.log10(30), math.log10(20000), 140)
-        for item, ch in ((self.s_l, L), (self.s_r, R)):
-            mag = np.abs(np.fft.rfft(ch * win)) * 2.0 / wsum
-            pts = []
+        wk = self.beam_plot('spec')
+        dt = self.frame_dt('spec')
+        self.spec_pts, paths = [], []
+        for ch, data in ((0, L), (1, R)):
+            mag = np.abs(np.fft.rfft(data * win)) * 2.0 / wsum
+            px, py = [], []
             for a, b_ in zip(edges[:-1], edges[1:]):
                 sel = (fr >= a) & (fr < b_)
                 v_ = float(mag[sel].max()) if sel.any() else float(mag[np.searchsorted(fr, a)])
                 dd = db(v_) + cd
-                pts += [self.fx(math.sqrt(a * b_)), min(y1, max(y0, y0 + (-dd) / DB_RANGE * (y1 - y0)))]
-            self.plot(item, pts)
+                px.append(self.fx(math.sqrt(a * b_)))
+                py.append(min(y1, max(y0, y0 + (-dd) / DB_RANGE * (y1 - y0))))
+            px, py = np.array(px), np.array(py)
+            paths.append((px - x0, py - y0))
+            self.spec_pts.append((px, py))
+        wk.add(lambda pl: [pl.add(ch, a[0], a[1], dt) for ch, a in enumerate(paths)])
+        self.show_plot('spec', self.spec_item, wk)
 
     def draw_spectrogram(self, clip, cd):
         c = self.c
@@ -3173,7 +3505,9 @@ class App:
 
     def refresh_history(self):
         """redraw the level history when it has moved on by a pixel or what it shows has changed.  It has its own fast timer because the main loop runs at a different and uneven pace"""
-        if self.paused or self.mode == 'compare' or (self.findings_on and self.mode == 'review'):
+        if self.paused or self.mode == 'compare' or (self.findings_on and self.mode == 'review') or self.zoom not in (None, 'hist'):
+            return False
+        if time.time() - self.plot_time.get('hist', 0.0) < 0.03:  # at most about 30 pictures a second, however wide the history is
             return False
         x0, y0, x1, y1 = self.P['hist']
         width = int(x1 - x0)
@@ -3215,10 +3549,24 @@ class App:
         keep = ids > ids[-1] - width
         bars, ids = bars[keep], ids[keep]
         xs = (x1 - (ids[-1] - ids)).astype(float)
-        for item, i in ((self.h_l, 0), (self.h_r, 1)):
+        wk = self.beam_plot('hist')
+        self.plot_time['hist'] = time.time()
+        self.hist_pts, paths = [], []
+        for i in (0, 1):
             dd = np.maximum(-DB_RANGE, 20 * np.log10(np.maximum(bars[:, i], 1e-6)) + cd)
             ys = y0 + (-np.minimum(dd, 0.0)) / DB_RANGE * (y1 - y0)
-            self.plot(item, np.stack([xs, ys], axis=1).ravel().tolist())
+            paths.append((xs - x0, ys - y0))
+            self.hist_pts.append((xs, ys))
+
+        offsets = self.HIST_OFFSETS
+
+        def job(pl):
+            pl.clear()  # a fresh picture each time: the history scrolls, it does not fade
+            for i, a in enumerate(paths):
+                for dy in offsets:  # the line is drawn a few times a fraction of a pixel apart: a more solid line
+                    pl.add(i, a[0], a[1] + dy, 0.0)
+        wk.add(job)
+        self.show_plot('hist', self.hist_item, wk)
 
     def cmp_report(self):
         c = self.cmp
@@ -3306,6 +3654,7 @@ def main():
         except Exception:
             pass
         try:
+            sys.setswitchinterval(0.001)  # the window thread gets the interpreter back within a millisecond when a graph's thread has it
             ctypes.windll.winmm.timeBeginPeriod(1)  # without it Windows timers tick every 15.6 ms, so 33 ms frames come 33-48 ms apart
         except Exception:
             pass

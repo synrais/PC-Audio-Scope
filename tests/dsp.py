@@ -17,7 +17,6 @@ check('stereo 997 Hz sine at -20 dBFS reads -20.0 LUFS', abs(li - (-20.0)) < 0.0
 li = dsp.integrated(dsp.kweight_blocks(sine(997, -20, right=False)))
 check('the same sine in the left channel only reads -23.0 LUFS', abs(li - (-23.01)) < 0.05, li)
 check('offset_db is added to the reading', abs(dsp.integrated(dsp.kweight_blocks(st), 6.0) - (-14.0)) < 0.05)
-check('short-term loudness agrees on a steady tone', abs(dsp.short_term(dsp.kweight_blocks(st)) - (-20.0)) < 0.05)
 check('silence has no integrated loudness', dsp.integrated(dsp.kweight_blocks(np.zeros((SR * 5, 2), np.float32))) is None)
 check('less than 400 ms has no integrated loudness', dsp.integrated(dsp.kweight_blocks(sine(997, -20, sec=0.3))) is None)
 

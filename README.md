@@ -31,17 +31,16 @@ the window appears.
 ## What it does
 
 **Live view**
-- oscilloscope (triggered on the left channel, its gain follows the sound by itself) and a vectorscope
-- peak meters with hold, balance, stereo correlation (+1 mono, 0 wide, -1 out of phase)
-- loudness in LUFS (ITU-R BS.1770 / EBU R128): short-term (3 s) and integrated (gated)
-- a count of flat-topped (clipped) 10 ms blocks per channel
+- oscilloscope (triggered on the left channel, its gain follows the sound by itself) and a vectorscope that draws like the beam of a CRT: bright where the beam moves slowly and dim where it sweeps, with a glow and a fading afterglow, so XY pictures such as oscilloscope music show clearly (play a lossless file for the cleanest picture). The oscilloscope, the spectrum and the level history are drawn the same way, as a glowing beam with a short afterglow (the level history does not dim its fast strokes, so a dip stays visible)
+- peak meters with hold, and a left/right balance meter
+- a count of clipped 10 ms blocks per channel (blocks with a flat top at full scale)
 - spectrum, with the ranges an equaliser uses named along its bottom (sub-bass 20-60 Hz, bass 60-250, low mids 250-500, mids 500-2k, upper mids 2k-4k, presence 4k-6k, brilliance 6k-20k), or a scrolling spectrogram (`G`), and a 30 second level history (the spectrum and the history share one dB scale, 0 down to -80, so their lines match, and silence is the same bottom line in both)
 - double-click the oscilloscope, vectorscope, spectrum or level history to enlarge it to the whole scope area, double-click again to see them all
 - input: the Windows default output (follows it when you change device), any other output, or any microphone
 - a dark title bar in the colours of the theme (Windows 10 and 11), and the program's own icon on the window and the taskbar
 
 **Record and review**
-- the DC offset of each channel is shown above the meters and turns red when it is large
+- the DC offset of each channel appears above the meters once it reaches 1 % (and turns red above 3 %); a clean signal has none, so nothing is shown
 - `REC` (`F5`) records what you hear, up to 10 minutes, to `recordings/clip_<date>.wav` and opens it on the timeline
 - every panel follows the playhead, so scopes, meters, loudness and the spectrogram all work on a recording
 - timeline (collapsed until you record, open a clip or compare; the window grows to fit it): click or drag to seek, wheel to zoom, right-drag to pan, double-click for the whole clip
@@ -133,6 +132,7 @@ can be resized; everything scales with it, and the size, position and settings a
 | `G` | spectrum / spectrogram |
 | `T` | next theme |
 | `C` | ignore the Windows volume in the levels, until the program is closed (see below) |
+| `R` | reset the peaks (session peak, held peaks, clipped-block counts) |
 | `1` `2` `3` | listen to A / B / the difference while comparing |
 | `Alt+Left` `Alt+Right` | nudge the chosen clip 10 ms (`Alt+Shift` 1 ms, `Alt+Ctrl` 100 ms) |
 | `Q` `Esc` | quit |
