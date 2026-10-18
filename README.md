@@ -31,18 +31,18 @@ the window appears.
 ## What it does
 
 **Live view**
-- oscilloscope (triggered on the left channel) and a vectorscope
+- oscilloscope (triggered on the left channel, its gain follows the sound by itself) and a vectorscope
 - peak meters with hold, balance, stereo correlation (+1 mono, 0 wide, -1 out of phase)
 - loudness in LUFS (ITU-R BS.1770 / EBU R128): short-term (3 s) and integrated (gated)
 - a count of flat-topped (clipped) 10 ms blocks per channel
-- spectrum, or a scrolling spectrogram (`G`), and a 30 second level history
+- spectrum, with the ranges an equaliser uses named along its bottom (sub-bass 20-60 Hz, bass 60-250, low mids 250-500, mids 500-2k, upper mids 2k-4k, presence 4k-6k, brilliance 6k-20k), or a scrolling spectrogram (`G`), and a 30 second level history (the spectrum and the history share one dB scale, 0 down to -80, so their lines match, and silence is the same bottom line in both)
 - input: the Windows default output (follows it when you change device), any other output, or any microphone
 
 **Record and review**
 - the DC offset of each channel is shown above the meters and turns red when it is large
 - `REC` (`F5`) records what you hear, up to 10 minutes, to `recordings/clip_<date>.wav` and opens it on the timeline
 - every panel follows the playhead, so scopes, meters, loudness and the spectrogram all work on a recording
-- timeline: click or drag to seek, wheel to zoom, right-drag to pan, double-click for the whole clip
+- timeline (collapsed until you record, open a clip or compare; the window grows to fit it): click or drag to seek, wheel to zoom, right-drag to pan, double-click for the whole clip
 - markers (`M`), an A-B selection (`I`, `O` or shift-drag) with its own loudness figures, loop (`P`), export of the selection (`E`)
 - markers, selection and the Windows volume a clip was recorded at are kept in a small `.json` next to the `.wav`
 
@@ -130,9 +130,7 @@ can be resized; everything scales with it, and the size, position and settings a
 | `E` | export the selection (or the whole clip) as a WAV |
 | `G` | spectrum / spectrogram |
 | `T` | next theme |
-| `+` `-` | scope gain; `A` auto gain |
-| `C` | add back the Windows volume (see below) |
-| `R` | reset peaks and loudness |
+| `C` | ignore the Windows volume in the levels, until the program is closed (see below) |
 | `1` `2` `3` | listen to A / B / the difference while comparing |
 | `Alt+Left` `Alt+Right` | nudge the chosen clip 10 ms (`Alt+Shift` 1 ms, `Alt+Ctrl` 100 ms) |
 | `Q` `Esc` | quit |
@@ -140,11 +138,11 @@ can be resized; everything scales with it, and the size, position and settings a
 ## How the levels are measured
 
 On the outputs this was developed with, Windows loopback capture sees the sound after the master volume, so a quiet Windows
-volume makes everything read low. The scope reads the volume of the output (read only, it never changes it) and, with
-*Add back Windows volume* on (the default), adds it back, so the numbers are about the level the program produced.
-Recordings remember the volume they were taken at, and playback undoes the current volume the same way, so a clip plays
-about as loud as it was heard, never above full scale. If your driver captures before the volume, switch the compensation
-off with `C`. A muted output is shown in the status line.
+volume makes everything read low. The scope reads the volume of the output (read only, it never changes it) and shows the
+levels as measured. Press `C` to ignore the Windows volume instead: it is added back, so the numbers are about the level
+the program produced (this lasts until the program is closed). Recordings remember the volume they were taken at, and
+playback undoes the current volume the same way, so a clip plays about as loud as it was heard, never above full scale.
+A muted output is shown in the status line.
 
 The loudness figures use the BS.1770 K-weighting; a stereo 997 Hz sine at -20 dBFS reads -20.0 LUFS (see `tests/dsp.py`).
 
@@ -153,7 +151,7 @@ The loudness figures use the BS.1770 K-weighting; a stereo 997 Hz sine at -20 dB
 The macOS build is made by GitHub Actions (see below) and has not been run on a Mac by its author, so expect rough edges.
 A Mac has no "what you hear" capture of its own: install a virtual audio device such as BlackHole, route the sound to it
 (a Multi-Output Device in Audio MIDI Setup lets you listen at the same time) and pick it as the input; microphones work
-directly. macOS asks for microphone permission the first time. There is no volume to add back, so `C` does nothing. The
+directly. macOS asks for microphone permission the first time. There is no Windows volume to ignore, so `C` does nothing. The
 build is for Apple Silicon. Recordings go to `~/Documents/PC Audio Scope/recordings`.
 
 ## Building the program yourself

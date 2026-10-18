@@ -17,6 +17,7 @@ import traceback
 import warnings
 from collections import deque
 from tkinter import filedialog
+from tkinter import font as tkfont
 
 
 
@@ -306,6 +307,19 @@ SG_NFFT = 4096
 SG_HOP = 1536  # 32 ms
 SG_BANDS = 160  # log-spaced from 30 Hz to 20 kHz
 _SG_WIN = np.hanning(SG_NFFT)
+# the ranges an equaliser talks about: (from Hz, to Hz, names from long to short, the range as text)
+EQ_BANDS = (
+    (20, 60, ('Sub-bass', 'Sub'), '20-60'),
+    (60, 250, ('Bass',), '60-250'),
+    (250, 500, ('Low mids', 'Low mid', 'Low'), '250-500'),
+    (500, 2000, ('Mids',), '500-2k'),
+    (2000, 4000, ('Upper mids', 'Hi mids', 'Hi mid'), '2k-4k'),
+    (4000, 6000, ('Presence', 'Pres.'), '4k-6k'),
+    (6000, 20000, ('Brilliance', 'Air'), '6k-20k'),
+)
+# the spectrum and the level history sit side by side and share one dB scale: the same range, the same lines on the same rows
+DB_RANGE = 80.0  # 0 dB at the top of the graph, -80 dB at the bottom; anything quieter, and silence, is drawn on the bottom line in both
+DB_LINES = (0, -10, -20, -30, -40, -50, -60, -70, -80)
 
 
 def _band_starts():
@@ -1359,16 +1373,15 @@ def Button(master, **kw):
 
 class App:
     """the main window: a scope canvas, button rows and a timeline canvas; modes live | rec | review | compare; everything scales with self.k"""
-    BASE_W, BASE_H, BASE_TH = 1240, 690, 188
+    BASE_W, BASE_H, BASE_TH = 1240, 672, 188
     NUDGES = [('-1s', -1.0), ('-100ms', -0.1), ('-10ms', -0.01), ('-1ms', -0.001), ('+1ms', 0.001), ('+10ms', 0.01), ('+100ms', 0.1), ('+1s', 1.0)]
 
     def __init__(self, root, cap):
         self.root, self.cap = root, cap
         s = self.load_settings()
         self.paused = False
-        self.auto = bool(s.get('auto', True))
-        self.gain = float(s.get('gain', 1.0))
-        self.comp = bool(s.get('comp', True))
+        self.gain = 1.0  # the scope's gain follows the sound by itself
+        self.comp = False  # levels are shown as measured; the C key ignores the Windows volume until the program is closed
         self.spec_mode = s.get('spec_mode', 'spectrum')
         self.hold = [FLOOR, FLOOR]
         self.hold_t = [0.0, 0.0]
@@ -1408,8 +1421,9 @@ class App:
             x, y = int(s.get('x', 20)), int(s.get('y', 20))
             if not (-200 < x < sw - 200 and -50 < y < sh - 100):
                 x, y = 20, 20
-            root.geometry('%dx%d+%d+%d' % (int(w), int(h), x, y))
-            self.k = self.fit_k(int(w), int(h))
+            root.geometry('+%d+%d' % (x, y))  # the size follows the content: it grows and shrinks with the timeline
+            k = s.get('k')
+            self.k = max(0.5, min(2.0, round(float(k) * 20) / 20.0)) if isinstance(k, (int, float)) else self.fit_k(int(w), int(h), True)
         else:
             k = min(1.0, (sh - 140) / float(self.BASE_H + 84 + self.BASE_TH), (sw - 40) / float(self.BASE_W))
             self.k = max(0.5, min(2.0, round(k * 20) / 20.0))
@@ -1434,7 +1448,7 @@ class App:
         try:
             os.makedirs(os.path.dirname(SETTINGS), exist_ok=True)
             self.root.update_idletasks()
-            json.dump({'w': self.root.winfo_width(), 'h': self.root.winfo_height(), 'x': self.root.winfo_x(), 'y': self.root.winfo_y(), 'auto': self.auto, 'gain': self.gain, 'comp': self.comp,
+            json.dump({'w': self.root.winfo_width(), 'h': self.root.winfo_height(), 'x': self.root.winfo_x(), 'y': self.root.winfo_y(), 'k': self.k,
                        'spec_mode': self.spec_mode, 'theme': self.th.name, 'loop': self.player.loop, 'last_dir': self.last_dir, 'source': list(self.cap.want)}, open(SETTINGS, 'w'))
         except Exception:
             pass
@@ -1449,7 +1463,6 @@ class App:
         self.theme_i = (self.theme_i + step) % len(THEMES)
         self.use_theme()
         self.build_ui()
-        self.msg('theme: ' + self.th.name)
 
     def quit(self):
         self.save_settings()
@@ -1511,10 +1524,17 @@ class App:
 
     def build_scope(self):
         S, c = self.S, self.c
-        base = dict(osc=(10, 44, 610, 320), vec=(625, 44, 901, 320), met=(916, 44, 1230, 320), spec=(10, 352, 610, 662), hist=(625, 352, 1230, 662))
+        base = dict(osc=(10, 44, 610, 320), vec=(625, 44, 901, 320), met=(916, 44, 1230, 320), spec=(10, 352, 610, 630), hist=(625, 352, 1230, 630))
         self.P = {n: tuple(S(v) for v in r) for n, r in base.items()}
         for x0, y0, x1, y1 in self.P.values():
             c.create_rectangle(x0, y0, x1, y1, outline=self.GRID)
+        # the spectrum and the level history keep their dB numbers in a column at the left of the frame; the graphs start after it, so no trace runs through a number.
+        # Both frames end on the lowest dB line, so a silent channel is a line at the same height in both.  self.P then holds the graph itself
+        self.gutter = S(46)
+        self.panel_frame = {n: self.P[n] for n in ('spec', 'hist')}
+        for n, (x0, y0, x1, y1) in self.panel_frame.items():
+            self.P[n] = (x0 + self.gutter, y0, x1, y1)
+            c.create_line(x0 + self.gutter, y0, x0 + self.gutter, y1, fill=self.GRID, tags=n)
 
         def t(x, y, s, **k):
             return c.create_text(S(x), S(y), text=s, fill=k.pop('fill', self.TXT), font=self.F(k.pop('size', 9)), anchor=k.pop('anchor', 'nw'), **k)
@@ -1524,14 +1544,12 @@ class App:
         t(625, 28, 'VECTORSCOPE  (left across, right up)')
         t(916, 28, 'LEVELS')
         self.spec_title = t(10, 336, 'SPECTRUM')
-        self.hist_title = t(625, 336, 'LEVEL HISTORY, 30 s  (peak per channel)')
-        t(10, 668, 'F5 record      SPACE play/pause      L live', size=8)
+        self.hist_title = t(625, 336, 'LEVEL HISTORY')
         # oscilloscope
         x0, y0, x1, y1 = self.P['osc']
         c.create_line(x0, (y0 + y1) / 2, x1, (y0 + y1) / 2, fill=self.GRID)
         self.o_l = self.trace(self.CL)
         self.o_r = self.trace(self.CR)
-        self.o_txt = c.create_text(x0 + S(6), y0 + S(4), text='', fill=self.TXT, font=self.F(9), anchor='nw')
         # vectorscope
         x0, y0, x1, y1 = self.P['vec']
         cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
@@ -1573,30 +1591,36 @@ class App:
         self.cor_mark = c.create_rectangle(S(1073), self.cor_y - S(6), S(1073), self.cor_y + S(6), fill=self.th.good, outline='')
         # spectrum (tag 'spec') and spectrogram (tag 'sg')
         x0, y0, x1, y1 = self.P['spec']
-        for f in (100, 1000, 10000):
-            xx = self.fx(f)
-            c.create_line(xx, y0, xx, y1, fill=self.GRID, tags='spec')
-            c.create_text(xx + S(3), y1 - S(14), text='%g Hz' % f if f < 1000 else '%g kHz' % (f / 1000), fill=self.TXT, font=self.F(8), anchor='nw', tags='spec')
-        for dd in (-20, -40, -60, -80):
-            yy = y0 + (-dd) / 100.0 * (y1 - y0)
-            c.create_line(x0, yy, x1, yy, fill=self.GRID, tags='spec')
-            c.create_text(x0 + S(3), yy + S(1), text='%d dB' % dd, fill=self.TXT, font=self.F(8), anchor='nw', tags='spec')
+        sfont = tkfont.Font(root=self.root, font=self.F(8))
+        for i, (lo, hi, names, rng) in enumerate(EQ_BANDS):  # the ranges an equaliser uses: tinted bands through the graph, their names under it
+            a, b_ = self.fx(max(lo, 30)), self.fx(hi)
+            if i % 2:
+                c.create_rectangle(a, y0 + 1, b_ - 1, y1, fill=mix(self.BG, self.th.fg, 0.05), outline='', tags='spec')
+            if lo > 30:
+                c.create_line(a, y0, a, y1 + S(30), fill=self.GRID, tags='spec')
+            name = next((n for n in names if sfont.measure(n) <= b_ - a - S(4)), names[-1])
+            c.create_text((a + b_) / 2, y1 + S(4), text=name, fill=self.th.fg, font=self.F(8), anchor='n', tags='spec')
+            c.create_text((a + b_) / 2, y1 + S(17), text=rng, fill=self.TXT, font=self.F(8), anchor='n', tags='spec')
+        for dd in DB_LINES:
+            yy = y0 + (-dd) / DB_RANGE * (y1 - y0)
+            c.create_line(x0, yy, x1, yy, fill=(self.th.peak if dd == 0 else self.GRID), tags='spec')
+            c.create_text(x0 - S(5), yy + S(1) if dd == 0 else yy, text='%d dB' % dd, fill=(self.th.peak if dd == 0 else self.TXT), font=self.F(8), anchor='ne' if dd == 0 else 'e', tags='spec')
         self.s_l = self.trace(self.CL, 'spec')
         self.s_r = self.trace(self.CR, 'spec')
         self.sg_item = c.create_image(x0 + 1, y0 + 1, anchor='nw', tags='sg')
         self.sg_head = c.create_line(-10, y0, -10, y1, fill='white', tags='sg')
         for f in (100, 1000, 10000):
             yy = y0 + (1.0 - (math.log10(f) - math.log10(30)) / (math.log10(20000) - math.log10(30))) * (y1 - y0)
-            c.create_text(x0 + S(4), yy, text='%g Hz' % f if f < 1000 else '%g kHz' % (f / 1000), fill='white', font=self.F(8), anchor='w', tags='sg')
+            c.create_text(x0 - S(5), yy, text='%g Hz' % f if f < 1000 else '%g kHz' % (f / 1000), fill=self.TXT, font=self.F(8), anchor='e', tags='sg')
         # history / compare report
         x0, y0, x1, y1 = self.P['hist']
-        for dd in (0, -12, -24, -36, -48, -60):
-            yy = y0 + (-dd) / 72.0 * (y1 - y0)
+        for dd in DB_LINES:
+            yy = y0 + (-dd) / DB_RANGE * (y1 - y0)
             c.create_line(x0, yy, x1, yy, fill=(self.th.peak if dd == 0 else self.GRID), tags='hist')
-            c.create_text(x0 + S(3), yy + S(1), text='%d dB' % dd, fill=(self.th.peak if dd == 0 else self.TXT), font=self.F(8), anchor='nw', tags='hist')
+            c.create_text(x0 - S(5), yy + S(1) if dd == 0 else yy, text='%d dB' % dd, fill=(self.th.peak if dd == 0 else self.TXT), font=self.F(8), anchor='ne' if dd == 0 else 'e', tags='hist')
         self.h_l = self.trace(self.CL, 'hist')
         self.h_r = self.trace(self.CR, 'hist')
-        self.cmp_txt = c.create_text(x0 + S(10), y0 + S(8), text='', fill=self.th.fg, font=self.F(10), anchor='nw', tags='cmp')
+        self.cmp_txt = c.create_text(self.panel_frame['hist'][0] + S(10), y0 + S(8), text='', fill=self.th.fg, font=self.F(10), anchor='nw', tags='cmp')
 
     def build_controls(self):
         f = tk.Frame(self.root, bg=self.th.panel)
@@ -1617,13 +1641,7 @@ class App:
         self.src_menu = tk.Menu(self.mb_src, tearoff=0, bg=self.th.btn, fg=self.th.fg, activebackground=self.th.btn_hi, activeforeground='white', font=self.F(9, 'Segoe UI'), postcommand=self.fill_src_menu)
         if not FLAT_BUTTONS:
             self.mb_src.config(menu=self.src_menu)
-        tk.Label(f, text='   Scope gain', **lab).pack(side='left')
-        mk('\u2212   (-)', lambda: self.zoom(0.8))
-        mk('+   (+)', lambda: self.zoom(1.25))
-        self.b_auto = mk('Auto gain  (A)', lambda: setattr(self, 'auto', not self.auto))
-        self.b_comp = mk('Add back Windows volume  (C)', lambda: setattr(self, 'comp', not self.comp))
         self.b_spec = mk('Spectrogram  (G)', lambda: self.set_spec_mode('spectrogram' if self.spec_mode == 'spectrum' else 'spectrum'))
-        mk('Reset peaks and loudness  (R)', self.reset_peaks)
         mk('Theme  (T)', self.cycle_theme)
         self.controls = f
 
@@ -1681,19 +1699,32 @@ class App:
         mk('Find problems  (F)', self.find_problems_key)
 
     def refresh_rows(self):
-        state = (self.mode in ('review', 'compare'), self.mode == 'compare')
+        """the compare and clip rows and the timeline under them only show when there is something for them: the timeline from the moment a recording starts, a clip is opened or two are compared"""
+        state = (self.mode in ('review', 'compare'), self.mode == 'compare', self.mode != 'live')
         if state == self._rows:
             return
         first = self._rows is None
         self._rows = state
-        for w in (self.cmp_row, self.clip_row):
+        for w in (self.cmp_row, self.clip_row, self.tl):
             w.pack_forget()
         if state[1]:
-            self.cmp_row.pack(fill='x', before=self.tl)
+            self.cmp_row.pack(fill='x')
         if state[0]:
-            self.clip_row.pack(fill='x', before=self.tl)
+            self.clip_row.pack(fill='x')
+        if state[2]:
+            self.tl.pack()
         if not first:
-            self.root.after(120, self.apply_resize)  # the rows changed the height: fit the content to the window again
+            self.root.after(30, self.fit_window)  # the window grows or shrinks with them
+
+    def fit_window(self):
+        """make the window as tall as its content now is"""
+        try:
+            if self.root.state() != 'normal':
+                return
+            self.root.update_idletasks()
+            self.root.geometry('%dx%d' % (max(self.root.winfo_width(), self.root.winfo_reqwidth()), self.root.winfo_reqheight()))
+        except tk.TclError:
+            pass
 
     def build_transport(self):
         f = tk.Frame(self.root, bg=self.BG)
@@ -1746,8 +1777,7 @@ class App:
 
     def build_timeline(self):
         S = self.S
-        self.tl = tk.Canvas(self.root, width=self.CW, height=self.TH, bg=self.th.tl_bg, highlightthickness=0)
-        self.tl.pack()
+        self.tl = tk.Canvas(self.root, width=self.CW, height=self.TH, bg=self.th.tl_bg, highlightthickness=0)  # packed by refresh_rows when there is something to show
         self.L0, self.L1 = S(40), self.CW - S(12)
         self.tl.bind('<ButtonPress-1>', self.tl_press)
         self.tl.bind('<B1-Motion>', self.tl_drag)
@@ -1777,12 +1807,7 @@ class App:
             r.bind(seq, h)
         kb('<space>', lambda: self.play_toggle() if self.mode in ('review', 'compare') else setattr(self, 'paused', not self.paused))
         kb('<F5>', self.rec_toggle, True)
-        kb('<plus>', lambda: self.zoom(1.25))
-        kb('<equal>', lambda: self.zoom(1.25))
-        kb('<minus>', lambda: self.zoom(0.8))
-        kb('a', lambda: setattr(self, 'auto', not self.auto))
         kb('c', lambda: setattr(self, 'comp', not self.comp))
-        kb('r', self.reset_peaks)
         kb('l', self.go_live)
         kb('<Control-o>', self.open_clip, True)
         if MACOS:
@@ -1829,9 +1854,11 @@ class App:
         except Exception:
             return 84.0
 
-    def fit_k(self, w, h):
-        """the scale at which the whole window content fits a window of w x h pixels"""
-        k = min(w / float(self.BASE_W), h / float(self.BASE_H + self.BASE_TH + self.rows_base()))
+    def fit_k(self, w, h, with_timeline=None):
+        """the scale at which the whole window content fits a window of w x h pixels (with the timeline, or without it while it is collapsed)"""
+        if with_timeline is None:
+            with_timeline = bool(self._rows and self._rows[2])
+        k = min(w / float(self.BASE_W), h / float(self.BASE_H + (self.BASE_TH if with_timeline else 0) + self.rows_base()))
         return max(0.5, min(2.0, round(k * 20) / 20.0))
 
     def on_configure(self, e):
@@ -2064,7 +2091,7 @@ class App:
     def findings_text(self):
         c = self.clip
         n = len(c.findings)
-        return chr(10).join(['%s: %d finding%s' % (c.name, n, '' if n == 1 else 's'), ''] + (format_findings(c.findings, 17) or ['no problems found']))
+        return chr(10).join(['%s: %d finding%s' % (c.name, n, '' if n == 1 else 's'), ''] + (format_findings(c.findings, 14) or ['no problems found']))
 
     def marker_add(self):
         if self.mode == 'rec':
@@ -2682,11 +2709,8 @@ class App:
 
     def draw_timeline(self):
         tl, S = self.tl, self.S
-        if self.mode == 'live':
-            if self.tl_key != 'live':
-                tl.delete('all')
-                tl.create_text(self.CW // 2, S(80), text='LIVE - press REC (F5) to record a session, Open... to load one, or Compare... to line up two clips', fill=self.th.faint, font=self.F(12, 'Segoe UI'))
-                self.tl_key = 'live'
+        if self.mode == 'live':  # the timeline is collapsed: nothing to draw
+            self.tl_key = None
             return
         d = self.duration()
         o = self.origin()
@@ -2801,8 +2825,6 @@ class App:
         self.b_rec.config(text=('■ STOP' if self.mode == 'rec' else '● REC'), bg=('#a02828' if self.mode == 'rec' else self.th.btn))
         self.b_play.config(text=('❚❚ PAUSE' if self.player.playing else '▶ PLAY'), state=('normal' if (self.mode == 'review' or (self.mode == 'compare' and not (self.cmp and self.cmp.get('live')))) else 'disabled'))
         self.b_loop.config(bg=(self.th.on if self.player.loop else self.th.btn))
-        self.b_auto.config(bg=(self.th.on if self.auto else self.th.btn))
-        self.b_comp.config(bg=(self.th.on if self.comp else self.th.btn))
         self.b_spec.config(bg=(self.th.on if self.spec_mode == 'spectrogram' else self.th.btn))
         if self.mode == 'rec':
             self.lbl_time.config(text='● REC  ' + fmt_time(self.duration(), True), fg='#ff6b6b')
@@ -2822,10 +2844,6 @@ class App:
     def fx(self, f):
         x0, y0, x1, y1 = self.P['spec']
         return x0 + (math.log10(f) - math.log10(30)) / (math.log10(20000) - math.log10(30)) * (x1 - x0)
-
-    def zoom(self, k):
-        self.auto = False
-        self.gain = min(1000.0, max(0.5, self.gain * k))
 
     def source(self, n):
         c = self.active_clip()
@@ -2849,10 +2867,10 @@ class App:
         zc = np.where((seg[:-1] < 0) & (seg[1:] >= 0))[0]
         s = int(zc[0]) if len(zc) else 0
         n = 1536
-        if self.auto:  # fit what is drawn (the trace and the last 800 samples of the vectorscope): the gain falls at once, so a peak never runs into the panel edge, and rises gently
-            pk = max(float(np.abs(x[s:s + n]).max()), float(np.abs(x[-800:]).max()))
-            tgt = min(1000.0, 0.9 / max(pk, 1e-4))
-            self.gain = tgt if tgt < self.gain else self.gain + (tgt - self.gain) * 0.15
+        # the gain fits what is drawn (the trace and the last 800 samples of the vectorscope): it falls at once, so a peak never runs into the panel edge, and rises gently
+        pk = max(float(np.abs(x[s:s + n]).max()), float(np.abs(x[-800:]).max()))
+        tgt = min(1000.0, 0.9 / max(pk, 1e-4))
+        self.gain = tgt if tgt < self.gain else self.gain + (tgt - self.gain) * 0.15
         g = self.gain
         # oscilloscope (rising-edge trigger on the left channel)
         x0, y0, x1, y1 = self.P['osc']
@@ -2875,7 +2893,6 @@ class App:
             arr = np.asarray(pts, dtype=float)
             for item, d in zip(self.v_halo, (1.5, -1.5)):
                 c.coords(item, *(arr + d).tolist())
-        c.itemconfig(self.o_txt, text='gain x%.1f%s' % (g, ' (auto)' if self.auto else ''))
         # levels, loudness
         tnow = time.time()
         if clip is not None:
@@ -2953,7 +2970,7 @@ class App:
         c.itemconfig('hist', state=('hidden' if (in_cmp or in_find) else 'normal'))
         c.itemconfig('cmp', state=('normal' if (in_cmp or in_find) else 'hidden'))
         c.itemconfig(self.hist_title, text=(('COMPARE   A = %s     B = %s' % (self.cmp['A'].name, self.cmp['B'].name)) if in_cmp else
-                                            ('FINDINGS  (F hides them; their markers on the timeline start with !)' if in_find else 'LEVEL HISTORY, 30 s  (peak per channel)')))
+                                            ('FINDINGS  (F hides them; their markers on the timeline start with !)' if in_find else 'LEVEL HISTORY')))
         if in_cmp:
             c.itemconfig(self.cmp_txt, text=self.cmp_report())
             self.hist_key = None
@@ -2966,7 +2983,8 @@ class App:
                 volt = 'Windows volume %d%% (%.1f dB)%s' % (round(v[1] * 100), v[0], '  MUTED - nothing is heard here!' if v[2] else '')
             else:
                 volt = 'recorded at Windows volume %.1f dB' % v[0]
-            volt += '  levels compensated' if self.comp else '  levels as measured'
+            if self.comp:
+                volt += '  Windows volume ignored'
         lv = bool(self.cmp and self.cmp.get('live'))
         who = ({'A': 'the recorded clip at the running point', 'B': 'the live sound', 'D': ''}[self.cmp['active']] if lv else {'A': 'A', 'B': 'B', 'D': 'the difference'}[self.cmp['active']]) if self.cmp else ''
         mode = {'live': 'LIVE', 'rec': 'LIVE + RECORDING', 'review': ('PLAYING' if self.player.playing else 'CLIP'),
@@ -2988,8 +3006,8 @@ class App:
             for a, b_ in zip(edges[:-1], edges[1:]):
                 sel = (fr >= a) & (fr < b_)
                 v_ = float(mag[sel].max()) if sel.any() else float(mag[np.searchsorted(fr, a)])
-                dd = max(-100.0, db(v_) + cd)
-                pts += [self.fx(math.sqrt(a * b_)), y0 + (-dd) / 100.0 * (y1 - y0)]
+                dd = db(v_) + cd
+                pts += [self.fx(math.sqrt(a * b_)), min(y1, max(y0, y0 + (-dd) / DB_RANGE * (y1 - y0)))]
             self.plot(item, pts)
 
     def draw_spectrogram(self, clip, cd):
@@ -3082,8 +3100,8 @@ class App:
         bars, ids = bars[keep], ids[keep]
         xs = (x1 - (ids[-1] - ids)).astype(float)
         for item, i in ((self.h_l, 0), (self.h_r, 1)):
-            dd = np.maximum(-72.0, 20 * np.log10(np.maximum(bars[:, i], 1e-6)) + cd)
-            ys = y0 + (-np.minimum(dd, 0.0)) / 72.0 * (y1 - y0)
+            dd = np.maximum(-DB_RANGE, 20 * np.log10(np.maximum(bars[:, i], 1e-6)) + cd)
+            ys = y0 + (-np.minimum(dd, 0.0)) / DB_RANGE * (y1 - y0)
             self.plot(item, np.stack([xs, ys], axis=1).ravel().tolist())
 
     def cmp_report(self):

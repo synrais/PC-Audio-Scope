@@ -16,9 +16,18 @@ root.withdraw()
 app = m.App(root, cap)
 
 # ---- every documented key is bound
-keys = ['<space>', '<F5>', '<plus>', '<minus>', 'a', 'c', 'r', 'l', '<Control-o>', 'g', 'f', 'm', '<Delete>', '<Prior>', '<Next>', 'i', 'o', 'x', 'p', 'e', '1', '2', '3',
+keys = ['<space>', '<F5>', 'c', 'l', '<Control-o>', 'g', 'f', 'm', '<Delete>', '<Prior>', '<Next>', 'i', 'o', 'x', 'p', 'e', '1', '2', '3',
         '<Left>', '<Right>', '<Shift-Left>', '<Alt-Left>', '<Alt-Shift-Left>', '<Alt-Control-Left>', '<Home>', '<End>', 'q', '<Escape>']
 check('all documented keys are bound', all(root.bind(k) for k in keys), [k for k in keys if not root.bind(k)])
+check('the gain and reset controls are gone: their keys are unbound and nothing of them is left', not any(root.bind(k) for k in ('<plus>', '<equal>', '<minus>', 'a', 'r')) and not hasattr(app, 'zoom') and not hasattr(app, 'b_auto') and not hasattr(app, 'auto'))
+labels = []
+for w_ in app.controls.winfo_children():
+    try:
+        labels.append(str(w_.cget('text')))
+    except tk.TclError:
+        pass
+check('the controls row has no gain, auto gain, reset or Windows volume button', not [t_ for t_ in labels if 'gain' in t_.lower() or 'reset' in t_.lower() or 'volume' in t_.lower()] and not hasattr(app, 'b_comp'), labels)
+check('the levels are shown as measured by default (the C key can ignore the Windows volume)', app.comp is False and bool(root.bind('c')))
 T.mute_keys(root)
 
 
@@ -48,32 +57,50 @@ app.pick_source(dict(kind='default', id=None, label='Default output'))
 check('picking an input asks the capture for it', app.cap.want == ('default', None))
 
 # ---- toggle buttons
-app.b_auto.invoke()
-check('Auto gain button toggles', app.auto is False)
-app.b_auto.invoke()
-check('Auto gain button toggles back', app.auto is True)
-comp = app.comp
-app.b_comp.invoke()
-check('Add back Windows volume button toggles', app.comp is (not comp))
-app.b_comp.invoke()
 app.b_spec.invoke()
 check('Spectrogram button switches the view', app.spec_mode == 'spectrogram')
 app.b_spec.invoke()
 check('Spectrogram button switches back', app.spec_mode == 'spectrum')
-app.zoom(1.25)
-check('manual gain turns auto gain off', app.auto is False)
-app.auto = True
-
 # ---- live spectrogram
 app.set_spec_mode('spectrogram')
 pump(root, 1.5)
 no_error('live spectrogram')
 check('live spectrogram: image drawn', app.sg_photo is not None)
 app.set_spec_mode('spectrum')
+# ---- the spectrum names the equaliser ranges along its bottom, and the oscilloscope no longer prints its gain
+texts = [app.c.itemcget(i, 'text') for i in app.c.find_withtag('spec') if app.c.type(i) == 'text']
+need = ['Bass', 'Mids', 'Sub', '60-250', '500-2k', '6k-20k']
+check('spectrum: the equaliser ranges are named along the bottom', all(any(t_.startswith(n) or t_ == n for t_ in texts) for n in need), texts)
+px0, py0, px1, py1 = app.P['spec']
+check('spectrum: the names sit under the graph, and the traces stay inside it',
+      all(app.c.coords(i)[1] > py1 for i in app.c.find_withtag('spec') if app.c.type(i) == 'text' and app.c.itemcget(i, 'text') in need) and all(py0 - 1 <= y_ <= py1 + 1 for y_ in app.c.coords(app.s_l[0][0])[1::2]), (app.P['spec'],))
+def db_rows(tag):
+    out = {}
+    for i in app.c.find_withtag(tag):
+        if app.c.type(i) == 'text' and app.c.itemcget(i, 'text').endswith(' dB'):
+            out[app.c.itemcget(i, 'text')] = (app.c.coords(i)[0], app.c.coords(i)[1])
+    return out
+rows_s, rows_h = db_rows('spec'), db_rows('hist')
+check('spectrum and level history: the same dB numbers on the same rows (they sit side by side)', len(rows_s) == 9 and {k: v[1] for k, v in rows_s.items()} == {k: v[1] for k, v in rows_h.items()}, (rows_s, rows_h))
+check('spectrum and level history: both graphs end on the -80 dB line, at the same row', abs(rows_s['-80 dB'][1] - py1) <= 1 and app.P['spec'][1::2] == app.P['hist'][1::2], (rows_s.get('-80 dB'), app.P['spec'], app.P['hist']))
+check('the dB numbers have their own column: left of every graph, so no trace can run through them', all(x_ < app.P['spec'][0] for x_, _ in rows_s.values()) and all(x_ < app.P['hist'][0] for x_, _ in rows_h.values()) and px0 > app.panel_frame['spec'][0] + app.S(30), (px0, app.panel_frame['spec']))
+main_s = [i for i, dy in app.s_l if dy == 0][0]
+main_h = [i for i, dy in app.h_l if dy == 0][0]
+app.draw_spectrum(np.zeros(4096), np.zeros(4096), 0.0)
+app.draw_history([(0.0, 0.0)] * 3100, 0.0, 4000)
+ys_s, ys_h = app.c.coords(main_s)[1::2], app.c.coords(main_h)[1::2]
+check('with no sound the spectrum and the level history both draw their line on the same bottom row', set(ys_s) == {float(py1)} and set(ys_h) == {float(py1)}, (sorted(set(ys_s))[:3], sorted(set(ys_h))[:3], py1))
+check('the spectrum and level history headers are plain', app.c.itemcget(app.spec_title, 'text') == 'SPECTRUM' and app.c.itemcget(app.hist_title, 'text') == 'LEVEL HISTORY', (app.c.itemcget(app.spec_title, 'text'), app.c.itemcget(app.hist_title, 'text')))
+pump(root, 0.3)
+check('the status line says nothing about the levels unless the Windows volume is being ignored', 'levels as measured' not in app.c.itemcget(app.status, 'text') and 'ignored' not in app.c.itemcget(app.status, 'text'), app.c.itemcget(app.status, 'text'))
+check('oscilloscope: no gain text in the panel', not any('gain' in app.c.itemcget(i, 'text') for i in app.c.find_all() if app.c.type(i) == 'text'))
+check('no hint line under the panels', not any('F5 record' in app.c.itemcget(i, 'text') or 'SPACE play' in app.c.itemcget(i, 'text') for i in app.c.find_all() if app.c.type(i) == 'text'))
+check('live: the timeline and the rows under the transport are collapsed', app.mode == 'live' and app.tl.winfo_manager() == '' and app.clip_row.winfo_manager() == '' and app.cmp_row.winfo_manager() == '', (app.tl.winfo_manager(), app.clip_row.winfo_manager()))
 
 # ---- record
 app.rec_toggle()
 pump(root, 0.5)
+check('recording opens the timeline', app.mode == 'rec' and app.tl.winfo_manager() == 'pack', (app.mode, app.tl.winfo_manager()))
 app.marker_add()
 pump(root, 2.5)
 app.rec_toggle()
@@ -206,6 +233,9 @@ app.cmp_close()
 check('close compare: back to review of A', app.mode == 'review' and app.clip is ca)
 app.go_live()
 check('live again', app.mode == 'live')
+pump(root, 0.3)
+check('going live collapses the timeline again', app.tl.winfo_manager() == '' and app.clip_row.winfo_manager() == '' and app.cmp_row.winfo_manager() == '', (app.tl.winfo_manager(),))
+check('fit_k counts the timeline only while it shows', app.fit_k(1240, 800, True) < app.fit_k(1240, 800, False) or app.fit_k(1240, 800, True) == app.fit_k(1240, 800, False) == 1.0, (app.fit_k(1240, 800, True), app.fit_k(1240, 800, False)))
 
 # ---- the open dialogs (answered by the test)
 exported = os.path.join(tmp, 'export_sel.wav')
@@ -321,7 +351,7 @@ for total in (4000, 4001, 4003, 4007, 4010, 4234):
     moved.append(max(abs(ya[c] - yb[c]) for c in set(ya) & set(yb)))
 check('history: a column keeps its height when new blocks arrive', max(moved) < 1e-9, moved)
 steps = [int(history_at(t_)[0][-1] - history_at(t_ - 1)[0][-1]) for t_ in range(4000, 4300)]
-check('history: the picture moves by 0 or exactly 1 pixel per block (60 pixels in 300 blocks)', set(steps) <= {0, 1} and 58 <= sum(steps) <= 62, (sorted(set(steps)), sum(steps)))
+check('history: the picture moves by 0 or exactly 1 pixel per block (the panel width x 300 / 3000 pixels in 300 blocks)', set(steps) <= {0, 1} and abs(sum(steps) - hw * 300 / m.HIST_BLOCKS) <= 2, (sorted(set(steps)), sum(steps), hw * 300 / m.HIST_BLOCKS))
 history_at(15)
 check('history: a very short run draws nothing and does not fail', True)
 
@@ -331,7 +361,6 @@ tt = np.arange(n_gain) / m.SR
 sig = 0.05 * np.sin(2 * np.pi * 220 * tt)
 sig[2 * m.SR:2 * m.SR + 1200] = 0.8 * np.sin(2 * np.pi * 220 * tt[:1200])  # a loud burst, older than the last 2048 samples of the window but inside the part that is drawn
 app.open_loaded(m.Clip(np.stack([sig, sig], axis=1), None, name='gain test'))
-app.auto = True
 ox0, oy0, ox1, oy1 = app.P['osc']
 worst = []
 for start_gain in (1.0, 18.0, 400.0):
@@ -436,6 +465,7 @@ for _ in m.THEMES:
     check('theme %s: the balance marker is a blend of its two channel colours' % th.name, all(l_ - 2 <= v <= h_ + 2 for v, l_, h_ in zip(bm, lo, hi)), (bm, th.left, th.right))
 check('cycling through every theme comes back to the first', app.th.name == first)
 check('a theme with glow draws each trace as a bright line with four dimmer ones around it', (app.cycle_theme() or True) and app.th.glow and len(app.o_l) == 5 and len(app.s_l) == 5 and len(app.h_r) == 5)
+check('changing the theme prints no message (the change is obvious)', 'theme' not in app.lbl_msg.cget('text').lower(), app.lbl_msg.cget('text'))
 app.set_spec_mode('spectrogram')
 pump(root, 1.0)
 no_error('themed spectrogram')
@@ -457,9 +487,7 @@ app.go_live()
 # ---- settings
 app.theme_i = 2
 app.use_theme()
-app.auto = False
-app.gain = 7.5
-app.comp = False
+app.comp = True
 app.set_spec_mode('spectrogram')
 app.player.loop = True
 app.save_settings()
@@ -477,8 +505,8 @@ cap.stop = True
 root2 = tk.Tk()
 root2.withdraw()
 app2 = m.App(root2, T.SynthCapture())
-check('settings restored', (app2.auto, app2.gain, app2.comp, app2.spec_mode, app2.player.loop) == (False, 7.5, False, 'spectrogram', True),
-      (app2.auto, app2.gain, app2.comp, app2.spec_mode, app2.player.loop))
+check('settings restored', (app2.comp, app2.spec_mode, app2.player.loop) == (False, 'spectrogram', True), (app2.comp, app2.spec_mode, app2.player.loop))
+check('the gain and the Windows volume switch are not settings: every start is automatic gain, levels as measured', 'auto' not in saved and 'gain' not in saved and 'comp' not in saved, sorted(saved))
 check('the theme is restored', app2.th.name == 'Amber phosphor', app2.th.name)
 root2.destroy()
 T.finish()
