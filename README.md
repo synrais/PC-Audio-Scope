@@ -1,8 +1,16 @@
 # PC Audio Scope
 
 A scope for the sound your PC is playing, or for any microphone, with a recorder, a timeline player and a tool for
-comparing two recordings, or a recording against the sound that is playing right now. It started as a way to check that
-two builds of the same game sound the same.
+comparing two recordings, or a recording against the sound that is playing right now.
+
+**It was designed so that an AI can listen on the same scope that a person uses.** Most AI assistants cannot play a
+recording and cannot watch a screen, but they can read numbers and look at pictures. So everything the scope shows a person is
+also available as text, JSON and pictures: every channel is measured on its own (a fault in one channel is invisible in a stereo
+mix, and loudness figures ignore DC), faults are found automatically and reported with a time and a channel, and a whole
+recording can be summed up in one picture. A person and an AI can look at the same clip, the same markers and the same
+findings, and talk about the same moment.
+
+It started as a way to check that two builds of the same game sound the same.
 
 ![review](docs/review.png)
 
@@ -31,6 +39,7 @@ the window appears.
 - input: the Windows default output (follows it when you change device), any other output, or any microphone
 
 **Record and review**
+- the DC offset of each channel is shown above the meters and turns red when it is large
 - `REC` (`F5`) records what you hear, up to 10 minutes, to `recordings/clip_<date>.wav` and opens it on the timeline
 - every panel follows the playhead, so scopes, meters, loudness and the spectrogram all work on a recording
 - timeline: click or drag to seek, wheel to zoom, right-drag to pan, double-click for the whole clip
@@ -54,6 +63,34 @@ the window appears.
 - *Stop live* saves the session as a WAV and opens it as clip B of an ordinary comparison, with the same alignment
 
 ![spectrogram](docs/spectrogram.png)
+
+## Finding problems: one scope for people and for AI
+
+`F`, or the *Find problems* button, looks through the open clip, **each channel on its own**, and reports what it finds. The
+findings replace the level history until you press `F` again, they are marked on the timeline (the markers start with `!`),
+and for a saved clip a report, a JSON file and a picture are written next to the WAV (`clip.analysis.txt`, `.json`, `.png`).
+
+It looks for:
+- **a channel that blasts** far above its own level while the other one does not (a decoder losing its state, for example)
+- **DC offset**: steps, and long stretches where a channel sits off centre (headroom lost, speaker cone pushed to one side)
+- **dropouts**: digital silence in the middle of sound, or one channel silent while the other plays
+- **stuck output** (a channel staying on one sample value), **clicks and pops**, **clipping**, and passages that are **out of phase**
+
+![analysis](docs/analysis.png)
+
+The same thing from the command line, with no window:
+
+```
+python pc_audio_scope.py --analyze clip.wav
+python pc_audio_scope.py --analyze reference.wav clip.wav
+```
+
+The first writes `clip.analysis.txt` (one line per finding: time, channel, what), `clip.analysis.json` and the overview picture
+above: level and DC offset per channel, a spectrogram, and the findings marked on all of them. With two files it also
+writes a segment-by-segment comparison: where each stretch of the first recording sits in the second (the offset can change
+along the clip), how alike they are there, the level and DC difference of each channel, and a verdict (same, level differs,
+DC offset differs, one channel differs, different sound). The same functions are in `pc_audio_scope.py` (`find_problems`,
+`compare_clips`, `findings_image`) if you want to call them from your own code.
 
 ## Themes
 
@@ -89,6 +126,7 @@ can be resized; everything scales with it, and the size, position and settings a
 | `M` | add a marker; `PageUp` `PageDown` jump between markers; `Delete` removes the nearest |
 | `I` `O` `X` | selection start / end / clear |
 | `P` | loop the selection (or the whole clip) |
+| `F` | find problems in the open clip (shows them, marks them, saves a report) |
 | `E` | export the selection (or the whole clip) as a WAV |
 | `G` | spectrum / spectrogram |
 | `T` | next theme |
@@ -139,7 +177,7 @@ On a Mac you open the app the first time with right-click, Open (it is unsigned)
 | `tests/` | `python tests/run.py` runs everything in about a minute, in a hidden window with a synthetic input; nothing is played |
 | `packaging/` | the PyInstaller recipe and the icon |
 | `releases/` | the ready-made programs |
-| `docs/` | the pictures above, made by `python tests/screenshots.py` from synthetic data |
+| `docs/` | the pictures above, made by `python tests/screenshots.py` from synthetic data (the analysis picture comes from a demo piece with a fault in each channel) |
 | `recordings/` | your clips (created on first use, not part of the repository) |
 
 ## Limits
