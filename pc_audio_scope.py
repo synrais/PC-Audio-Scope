@@ -848,6 +848,46 @@ def mix(a, b, t):
     return '#%02x%02x%02x' % tuple(round(x + (y - x) * t) for x, y in zip(pa, pb))
 
 
+def draw_icon(n=256):
+    """the application icon as an n x n RGBA picture: a dark rounded square with a graticule and two glowing traces.  The window and taskbar icon and the icon of the program file
+    (packaging/make_icon.py writes icon.ico and icon.icns from this) are the same picture"""
+    from PIL import ImageDraw, ImageFilter
+    k = n / 1024.0
+    px = lambda v: max(1, int(round(v * k)))
+
+    def trace(color, phase, amp, freq):
+        pts = []
+        for i in range(0, 725, 4):
+            t = i / 724.0
+            pts.append(((150 + i) * k, n / 2.0 + amp * k * math.sin(2 * math.pi * freq * t + phase) * (0.55 + 0.45 * math.sin(math.pi * t))))
+        glow = Image.new('RGBA', (n, n), (0, 0, 0, 0))
+        ImageDraw.Draw(glow).line(pts, fill=color + (255,), width=px(70), joint='curve')
+        glow = glow.filter(ImageFilter.GaussianBlur(34 * k))
+        core = Image.new('RGBA', (n, n), (0, 0, 0, 0))
+        d = ImageDraw.Draw(core)
+        d.line(pts, fill=color + (255,), width=px(26), joint='curve')
+        light = tuple(min(255, c + 120) for c in color)
+        d.line(pts, fill=light + (255,), width=px(9), joint='curve')
+        return glow, core
+    tile = Image.new('RGBA', (n, n), (0, 0, 0, 0))
+    d = ImageDraw.Draw(tile)
+    d.rounded_rectangle((28 * k, 28 * k, n - 28 * k, n - 28 * k), radius=210 * k, fill=(7, 11, 17, 255), outline=(52, 64, 78, 255), width=px(10))
+    for i in range(1, 8):  # graticule
+        p = (28 + i * (1024 - 56) / 8.0) * k
+        d.line([(p, 90 * k), (p, n - 90 * k)], fill=(26, 34, 44, 255), width=px(4))
+        d.line([(90 * k, p), (n - 90 * k, p)], fill=(26, 34, 44, 255), width=px(4))
+    d.line([(90 * k, n / 2.0), (n - 90 * k, n / 2.0)], fill=(40, 52, 66, 255), width=px(6))
+    layers = [trace((255, 138, 31), 0.0, 230, 1.5), trace((47, 181, 255), 1.9, 190, 2.5)]
+    for glow, _ in layers:
+        tile = Image.alpha_composite(tile, glow)
+    for _, core in layers:
+        tile = Image.alpha_composite(tile, core)
+    mask = Image.new('L', (n, n), 0)
+    ImageDraw.Draw(mask).rounded_rectangle((28 * k, 28 * k, n - 28 * k, n - 28 * k), radius=210 * k, fill=255)
+    tile.putalpha(Image.composite(tile.getchannel('A'), Image.new('L', (n, n), 0), mask))
+    return tile
+
+
 class Theme:
     """the colours of the window: a background, one colour for each channel and a tint for the text; the rest is blended from those"""
     def __init__(self, name, bg, left, right, lname, rname, tint='#b8c4cc', accent='#4a90d9', vec=None, a=None, b=None, mark=None, on=None, spec=None, glow=True, good=None, mid=None, bad='#ffffff', live=None, peak=None):
@@ -1409,10 +1449,16 @@ class App:
         self.view_user = False
         self.cmp_busy = False
         self.findings_on = False  # the findings list replaces the level history
+        self.zoom = None  # the scope panel that fills the whole scope area (click a scope), or None
         self.dc_now = [0.0, 0.0]
         self.last_dir = s.get('last_dir') or REC_DIR
         sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
         root.title('PC Audio Scope')
+        try:  # the same picture as the icon of the program file, instead of Tk's feather
+            self.icons = [ImageTk.PhotoImage(draw_icon(n)) for n in (256, 64, 32, 16)]
+            root.iconphoto(True, *self.icons)
+        except Exception:
+            self.icons = []
         root.minsize(640, 420)
         w, h = s.get('w'), s.get('h')
         self._rows = None
@@ -1434,6 +1480,8 @@ class App:
             cap.set_source(src[0], src[1])
         root.protocol('WM_DELETE_WINDOW', self.quit)
         root.bind('<Configure>', self.on_configure)
+        self.style_titlebar()
+        root.after(300, self.style_titlebar)  # again once the window is on screen
         self.tick()
         self.history_loop()
 
@@ -1459,10 +1507,35 @@ class App:
         self.lut = palette(base=th.spec)
         self.root.configure(bg=th.bg)
 
+    def style_titlebar(self):
+        """a dark title bar in the colours of the theme instead of the white one (Windows 10 and 11; where the system cannot do it, nothing changes)"""
+        if not WINDOWS:
+            return
+        try:
+            from ctypes import wintypes
+            self.root.update_idletasks()
+            hwnd = ctypes.windll.user32.GetParent(self.root.winfo_id())
+            dwm = ctypes.windll.dwmapi
+            dwm.DwmSetWindowAttribute.argtypes = [wintypes.HWND, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD]
+            colorref = lambda h: int(h[5:7], 16) << 16 | int(h[3:5], 16) << 8 | int(h[1:3], 16)  # 0x00BBGGRR
+
+            def put(attr, v):
+                val = ctypes.c_int(v)
+                return dwm.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(val), 4)
+            if put(20, 1) != 0:  # use the dark title bar (19 on the first builds that had it)
+                put(19, 1)
+            put(35, colorref(self.th.bg))  # title bar colour (Windows 11)
+            put(36, colorref(self.th.fg))  # title text
+            put(34, colorref(self.th.grid))  # window border
+            ctypes.windll.user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, 0x37)  # redraw the frame
+        except Exception:
+            pass
+
     def cycle_theme(self, step=1):
         self.theme_i = (self.theme_i + step) % len(THEMES)
         self.use_theme()
         self.build_ui()
+        self.style_titlebar()
 
     def quit(self):
         self.save_settings()
@@ -1483,6 +1556,8 @@ class App:
         self.CW, self.CH, self.TH = S(self.BASE_W), S(self.BASE_H), S(self.BASE_TH)
         self.c = tk.Canvas(self.root, width=self.CW, height=self.CH, bg=self.BG, highlightthickness=0)
         self.c.pack()
+        self.c.bind('<Double-Button-1>', self.scope_click)  # a single click does nothing: it takes two to enlarge a scope or to go back
+        self.c.bind('<Motion>', self.scope_motion)
         self.build_scope()
         self.build_controls()
         self.build_transport()
@@ -1525,7 +1600,14 @@ class App:
     def build_scope(self):
         S, c = self.S, self.c
         base = dict(osc=(10, 44, 610, 320), vec=(625, 44, 901, 320), met=(916, 44, 1230, 320), spec=(10, 352, 610, 630), hist=(625, 352, 1230, 630))
-        self.P = {n: tuple(S(v) for v in r) for n, r in base.items()}
+        zoom = self.zoom
+        zoomed = dict(osc=(10, 44, 1230, 662), vec=(311, 44, 929, 662), spec=(10, 44, 1230, 630), hist=(10, 44, 1230, 662))
+        away = self.CW + S(100)  # panels that are not shown are built this far to the right, out of sight
+        hid = lambda n: zoom is not None and n != zoom
+        self.P = {}
+        for n, r in base.items():
+            r = tuple(S(v) for v in (zoomed[n] if n == zoom else r))
+            self.P[n] = (r[0] + away, r[1], r[2] + away, r[3]) if hid(n) else r
         for x0, y0, x1, y1 in self.P.values():
             c.create_rectangle(x0, y0, x1, y1, outline=self.GRID)
         # the spectrum and the level history keep their dB numbers in a column at the left of the frame; the graphs start after it, so no trace runs through a number.
@@ -1536,15 +1618,15 @@ class App:
             self.P[n] = (x0 + self.gutter, y0, x1, y1)
             c.create_line(x0 + self.gutter, y0, x0 + self.gutter, y1, fill=self.GRID, tags=n)
 
-        def t(x, y, s, **k):
-            return c.create_text(S(x), S(y), text=s, fill=k.pop('fill', self.TXT), font=self.F(k.pop('size', 9)), anchor=k.pop('anchor', 'nw'), **k)
+        def t(x, y, s, out=False, **k):
+            return c.create_text(S(x) + (away if out else 0), S(y), text=s, fill=k.pop('fill', self.TXT), font=self.F(k.pop('size', 9)), anchor=k.pop('anchor', 'nw'), **k)
         self.status = t(10, 8, '', size=10)
-        self.dc_txt = t(985, 28, '')
-        t(10, 28, 'OSCILLOSCOPE   left = %s, right = %s' % (self.th.lname, self.th.rname))
-        t(625, 28, 'VECTORSCOPE  (left across, right up)')
-        t(916, 28, 'LEVELS')
-        self.spec_title = t(10, 336, 'SPECTRUM')
-        self.hist_title = t(625, 336, 'LEVEL HISTORY')
+        self.dc_txt = t(985, 28, '', zoom is not None)
+        t(10, 28, 'OSCILLOSCOPE   left = %s, right = %s' % (self.th.lname, self.th.rname), hid('osc'))
+        t(311 if zoom == 'vec' else 625, 28, 'VECTORSCOPE  (left across, right up)', hid('vec'))
+        t(916, 28, 'LEVELS', zoom is not None)
+        self.spec_title = t(10, 28 if zoom == 'spec' else 336, 'SPECTRUM', hid('spec'))
+        self.hist_title = t(10 if zoom == 'hist' else 625, 28 if zoom == 'hist' else 336, 'LEVEL HISTORY', hid('hist'))
         # oscilloscope
         x0, y0, x1, y1 = self.P['osc']
         c.create_line(x0, (y0 + y1) / 2, x1, (y0 + y1) / 2, fill=self.GRID)
@@ -1560,10 +1642,12 @@ class App:
         c.create_text(cx + S(4), y0 + S(3), text='R', fill=self.CR, font=self.F(9), anchor='nw')
         self.v_halo = [c.create_line(0, 0, 1, 1, fill=mix(self.BG, self.th.vec, 0.3)) for _ in range(2)] if self.th.glow else None
         self.v = [c.create_line(0, 0, 1, 1, fill=col) for col in self.th.trails]
-        # meters
+        # meters (absolute positions; out of sight while a scope fills the area)
         x0, y0, x1, y1 = self.P['met']
+        mx = away if zoom is not None else 0
+        self.bal_x = S(1073) + mx
         self.bar_h = S(90)
-        self.bar_xs = (S(946), S(1056))
+        self.bar_xs = (S(946) + mx, S(1056) + mx)
         self.m_bar = []
         for i, xb in enumerate(self.bar_xs):
             c.create_rectangle(xb, y0 + S(20), xb + S(50), y0 + S(20) + self.bar_h, outline=self.GRID)
@@ -1573,22 +1657,22 @@ class App:
             self.m_bar.append((bar, hold))
         for dd in (0, -6, -12, -24, -48):
             yy = y0 + S(20) + (-dd) / 60.0 * self.bar_h
-            c.create_line(S(1010), yy, S(1044), yy, fill=(self.th.peak if dd == 0 else self.GRID))
-            c.create_text(S(1027), yy - S(5), text='%d' % dd, fill=(self.th.peak if dd == 0 else self.TXT), font=self.F(8), anchor='n')
-        self.m_txt = c.create_text(S(924), y0 + S(118), text='', fill=self.TXT, font=self.F(9), anchor='nw')
+            c.create_line(S(1010) + mx, yy, S(1044) + mx, yy, fill=(self.th.peak if dd == 0 else self.GRID))
+            c.create_text(S(1027) + mx, yy - S(5), text='%d' % dd, fill=(self.th.peak if dd == 0 else self.TXT), font=self.F(8), anchor='n')
+        self.m_txt = c.create_text(S(924) + mx, y0 + S(118), text='', fill=self.TXT, font=self.F(9), anchor='nw')
         self.bal_y = y0 + S(214)
         self.cor_y = y0 + S(254)
-        self.bal_lbl = c.create_text(S(924), self.bal_y - S(19), text='', fill=self.TXT, font=self.F(9), anchor='nw')
-        self.cor_lbl = c.create_text(S(924), self.cor_y - S(19), text='', fill=self.TXT, font=self.F(9), anchor='nw')
+        self.bal_lbl = c.create_text(S(924) + mx, self.bal_y - S(19), text='', fill=self.TXT, font=self.F(9), anchor='nw')
+        self.cor_lbl = c.create_text(S(924) + mx, self.cor_y - S(19), text='', fill=self.TXT, font=self.F(9), anchor='nw')
         for yy in (self.bal_y, self.cor_y):
-            c.create_line(S(934), yy, S(1212), yy, fill=self.GRID)
-            c.create_line(S(1073), yy - S(7), S(1073), yy + S(7), fill=self.GRID)
-        c.create_text(S(934), self.bal_y + S(8), text='LEFT', fill=self.CL, font=self.F(8), anchor='nw')
-        c.create_text(S(1212), self.bal_y + S(8), text='RIGHT', fill=self.CR, font=self.F(8), anchor='ne')
-        c.create_text(S(934), self.cor_y + S(8), text='-1 opposite', fill=self.TXT, font=self.F(8), anchor='nw')
-        c.create_text(S(1212), self.cor_y + S(8), text='+1 mono', fill=self.TXT, font=self.F(8), anchor='ne')
-        self.bal_mark = c.create_rectangle(S(1073), self.bal_y - S(6), S(1073), self.bal_y + S(6), fill=self.th.good, outline='')
-        self.cor_mark = c.create_rectangle(S(1073), self.cor_y - S(6), S(1073), self.cor_y + S(6), fill=self.th.good, outline='')
+            c.create_line(S(934) + mx, yy, S(1212) + mx, yy, fill=self.GRID)
+            c.create_line(self.bal_x, yy - S(7), self.bal_x, yy + S(7), fill=self.GRID)
+        c.create_text(S(934) + mx, self.bal_y + S(8), text='LEFT', fill=self.CL, font=self.F(8), anchor='nw')
+        c.create_text(S(1212) + mx, self.bal_y + S(8), text='RIGHT', fill=self.CR, font=self.F(8), anchor='ne')
+        c.create_text(S(934) + mx, self.cor_y + S(8), text='-1 opposite', fill=self.TXT, font=self.F(8), anchor='nw')
+        c.create_text(S(1212) + mx, self.cor_y + S(8), text='+1 mono', fill=self.TXT, font=self.F(8), anchor='ne')
+        self.bal_mark = c.create_rectangle(self.bal_x, self.bal_y - S(6), self.bal_x, self.bal_y + S(6), fill=self.th.good, outline='')
+        self.cor_mark = c.create_rectangle(self.bal_x, self.cor_y - S(6), self.bal_x, self.cor_y + S(6), fill=self.th.good, outline='')
         # spectrum (tag 'spec') and spectrogram (tag 'sg')
         x0, y0, x1, y1 = self.P['spec']
         sfont = tkfont.Font(root=self.root, font=self.F(8))
@@ -1621,6 +1705,38 @@ class App:
         self.h_l = self.trace(self.CL, 'hist')
         self.h_r = self.trace(self.CR, 'hist')
         self.cmp_txt = c.create_text(self.panel_frame['hist'][0] + S(10), y0 + S(8), text='', fill=self.th.fg, font=self.F(10), anchor='nw', tags='cmp')
+
+    def scope_hit(self, x, y):
+        """the scope panel under the mouse (the levels cannot be enlarged), or None"""
+        for n in ('osc', 'vec', 'spec', 'hist'):
+            x0, y0, x1, y1 = self.panel_frame.get(n) or self.P[n]
+            if n == 'spec':
+                y1 += self.S(32)  # the names of the equaliser ranges under the graph belong to it
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                return n
+        return None
+
+    def scope_click(self, e):
+        if self.zoom:
+            self.zoom_panel(None)
+            return
+        n = self.scope_hit(e.x, e.y)
+        if n:
+            self.zoom_panel(n)
+
+    def scope_motion(self, e):
+        self.c.config(cursor='hand2' if (self.zoom or self.scope_hit(e.x, e.y)) else '')
+
+    def zoom_panel(self, name):
+        """name fills the whole scope area; None shows all the panels again"""
+        self.zoom = name
+        self.c.delete('all')
+        self.build_scope()
+        self.hist_key = None
+        self.sg_photo = None
+        self.prev_vec = []
+        self.set_spec_mode(self.spec_mode)
+        self.draw()
 
     def build_controls(self):
         f = tk.Frame(self.root, bg=self.th.panel)
@@ -2881,7 +2997,7 @@ class App:
             self.plot(item, np.stack([xs, ys], axis=1).ravel().tolist())
         # vectorscope
         x0, y0, x1, y1 = self.P['vec']
-        cx, cy, r = (x0 + x1) / 2, (y0 + y1) / 2, (x1 - x0) / 2 - 4
+        cx, cy, r = (x0 + x1) / 2, (y0 + y1) / 2, min(x1 - x0, y1 - y0) / 2 - 4
         m = 800
         px = np.clip(cx + L[-m:] * g * r, x0 + 1, x1 - 1)
         py = np.clip(cy - R[-m:] * g * r, y0 + 1, y1 - 1)
@@ -2942,17 +3058,17 @@ class App:
             c.coords(hold, xb, hy, xb + S(50), hy)
         rms = [math.sqrt(float(np.mean(x[-9600:, i] ** 2))) for i in (0, 1)]
         bal = (db(rms[1]) - db(rms[0])) if (rms[0] > 1e-7 and rms[1] > 1e-7) else 0.0
-        bx = S(1073) + max(-12.0, min(12.0, bal)) / 12.0 * S(120)
-        c.coords(self.bal_mark, min(S(1073), bx), self.bal_y - S(6), max(S(1073), bx) + 2, self.bal_y + S(6))
+        bx = self.bal_x + max(-12.0, min(12.0, bal)) / 12.0 * S(120)
+        c.coords(self.bal_mark, min(self.bal_x, bx), self.bal_y - S(6), max(self.bal_x, bx) + 2, self.bal_y + S(6))
         c.itemconfig(self.bal_mark, fill=mix(self.th.left, self.th.right, (max(-12.0, min(12.0, bal)) + 12.0) / 24.0))
         c.itemconfig(self.bal_lbl, text='balance R-L  %+.1f dB' % bal)
         cor = correlation(x[-9600:, 0], x[-9600:, 1])
         if cor is None:
-            c.coords(self.cor_mark, S(1073), self.cor_y - S(6), S(1073), self.cor_y + S(6))
+            c.coords(self.cor_mark, self.bal_x, self.cor_y - S(6), self.bal_x, self.cor_y + S(6))
             c.itemconfig(self.cor_lbl, text='correlation  --')
         else:
-            cxp = S(1073) + cor * S(120)
-            c.coords(self.cor_mark, min(S(1073), cxp), self.cor_y - S(6), max(S(1073), cxp) + 2, self.cor_y + S(6))
+            cxp = self.bal_x + cor * S(120)
+            c.coords(self.cor_mark, min(self.bal_x, cxp), self.cor_y - S(6), max(self.bal_x, cxp) + 2, self.cor_y + S(6))
             c.itemconfig(self.cor_mark, fill=(self.th.good if cor > 0.5 else (self.th.mid if cor > 0 else self.th.bad)))
             c.itemconfig(self.cor_lbl, text='correlation  %+.2f   %s' % (cor, 'mono-ish' if cor > 0.8 else ('wide stereo' if cor > 0.2 else ('unrelated' if cor > -0.2 else 'OUT OF PHASE'))))
         fm = lambda v_: ('%.1f' % v_) if (v_ is not None and v_ > -100) else '--'
@@ -3191,6 +3307,10 @@ def main():
             pass
         try:
             ctypes.windll.winmm.timeBeginPeriod(1)  # without it Windows timers tick every 15.6 ms, so 33 ms frames come 33-48 ms apart
+        except Exception:
+            pass
+        try:  # its own taskbar button with its own icon, not grouped under Python's when run from source
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('PCAudioScope.App')
         except Exception:
             pass
     if '--check' in sys.argv:

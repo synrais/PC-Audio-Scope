@@ -36,7 +36,9 @@ the window appears.
 - loudness in LUFS (ITU-R BS.1770 / EBU R128): short-term (3 s) and integrated (gated)
 - a count of flat-topped (clipped) 10 ms blocks per channel
 - spectrum, with the ranges an equaliser uses named along its bottom (sub-bass 20-60 Hz, bass 60-250, low mids 250-500, mids 500-2k, upper mids 2k-4k, presence 4k-6k, brilliance 6k-20k), or a scrolling spectrogram (`G`), and a 30 second level history (the spectrum and the history share one dB scale, 0 down to -80, so their lines match, and silence is the same bottom line in both)
+- double-click the oscilloscope, vectorscope, spectrum or level history to enlarge it to the whole scope area, double-click again to see them all
 - input: the Windows default output (follows it when you change device), any other output, or any microphone
+- a dark title bar in the colours of the theme (Windows 10 and 11), and the program's own icon on the window and the taskbar
 
 **Record and review**
 - the DC offset of each channel is shown above the meters and turns red when it is large

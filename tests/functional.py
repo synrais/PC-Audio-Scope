@@ -19,7 +19,7 @@ app = m.App(root, cap)
 keys = ['<space>', '<F5>', 'c', 'l', '<Control-o>', 'g', 'f', 'm', '<Delete>', '<Prior>', '<Next>', 'i', 'o', 'x', 'p', 'e', '1', '2', '3',
         '<Left>', '<Right>', '<Shift-Left>', '<Alt-Left>', '<Alt-Shift-Left>', '<Alt-Control-Left>', '<Home>', '<End>', 'q', '<Escape>']
 check('all documented keys are bound', all(root.bind(k) for k in keys), [k for k in keys if not root.bind(k)])
-check('the gain and reset controls are gone: their keys are unbound and nothing of them is left', not any(root.bind(k) for k in ('<plus>', '<equal>', '<minus>', 'a', 'r')) and not hasattr(app, 'zoom') and not hasattr(app, 'b_auto') and not hasattr(app, 'auto'))
+check('the gain and reset controls are gone: their keys are unbound and nothing of them is left', not any(root.bind(k) for k in ('<plus>', '<equal>', '<minus>', 'a', 'r')) and not callable(getattr(app, 'zoom', None)) and not hasattr(app, 'b_auto') and not hasattr(app, 'auto'))
 labels = []
 for w_ in app.controls.winfo_children():
     try:
@@ -95,6 +95,32 @@ pump(root, 0.3)
 check('the status line says nothing about the levels unless the Windows volume is being ignored', 'levels as measured' not in app.c.itemcget(app.status, 'text') and 'ignored' not in app.c.itemcget(app.status, 'text'), app.c.itemcget(app.status, 'text'))
 check('oscilloscope: no gain text in the panel', not any('gain' in app.c.itemcget(i, 'text') for i in app.c.find_all() if app.c.type(i) == 'text'))
 check('no hint line under the panels', not any('F5 record' in app.c.itemcget(i, 'text') or 'SPACE play' in app.c.itemcget(i, 'text') for i in app.c.find_all() if app.c.type(i) == 'text'))
+icon = m.draw_icon(64)
+check('the window uses the program icon (the same drawing as the icon of the file), not the Tk feather', len(app.icons) == 4 and icon.size == (64, 64) and icon.getpixel((0, 0))[3] == 0 and icon.getpixel((32, 32))[3] == 255 and m.draw_icon(1024).size == (1024, 1024))
+
+# ---- click a scope: it fills the whole scope area; click again: all of them are back
+from types import SimpleNamespace as Ev0
+check('it takes a double click: the canvas answers <Double-Button-1> and a single click does nothing', bool(app.c.bind('<Double-Button-1>')) and not app.c.bind('<Button-1>'), (app.c.bind('<Double-Button-1>'), app.c.bind('<Button-1>')))
+normal_P, normal_frame = dict(app.P), dict(app.panel_frame)
+mid = lambda n: ((app.P[n][0] + app.P[n][2]) // 2, (app.P[n][1] + app.P[n][3]) // 2)
+for name in ('osc', 'vec', 'spec', 'hist'):
+    x_, y_ = mid(name)
+    app.scope_click(Ev0(x=x_, y=y_))
+    pump(root, 0.5)
+    no_error('zoomed ' + name)
+    others = [n for n in ('osc', 'vec', 'met', 'spec', 'hist') if n != name]
+    big = app.P[name][2] - app.P[name][0] > app.S(560) and app.P[name][3] - app.P[name][1] > app.S(500)
+    check('clicking the %s fills the scope area and the other panels are out of sight' % name, app.zoom == name and big and all(app.P[n][0] >= app.CW for n in others), (app.zoom, app.P))
+    if name == 'vec':
+        check('the zoomed vectorscope stays square', app.P['vec'][2] - app.P['vec'][0] == app.P['vec'][3] - app.P['vec'][1], app.P['vec'])
+    if name == 'spec':
+        check('the zoomed spectrum still names its ranges under the graph', any(app.c.itemcget(i, 'text') == 'Bass' and app.c.coords(i)[1] > app.P['spec'][3] and app.c.coords(i)[0] < app.CW for i in app.c.find_withtag('spec') if app.c.type(i) == 'text'))
+    app.scope_click(Ev0(x=app.S(300), y=app.S(300)))
+    pump(root, 0.3)
+    check('clicking again shows all the panels again (%s)' % name, app.zoom is None and app.P == normal_P and app.panel_frame == normal_frame, (app.zoom,))
+app.scope_click(Ev0(x=(normal_P['met'][0] + normal_P['met'][2]) // 2, y=(normal_P['met'][1] + normal_P['met'][3]) // 2))
+check('the levels panel is not enlarged by a click', app.zoom is None)
+no_error('after zooming')
 check('live: the timeline and the rows under the transport are collapsed', app.mode == 'live' and app.tl.winfo_manager() == '' and app.clip_row.winfo_manager() == '' and app.cmp_row.winfo_manager() == '', (app.tl.winfo_manager(), app.clip_row.winfo_manager()))
 
 # ---- record
