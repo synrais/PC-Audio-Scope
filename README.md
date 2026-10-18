@@ -8,12 +8,19 @@ two builds of the same game sound the same.
 
 ## Download
 
-Releases on this page have a Windows program (`PC-Audio-Scope.exe`, nothing to install; put it in its own folder because it
-keeps your recordings next to itself) and an experimental macOS app. Both are unsigned: Windows SmartScreen may say
-"unknown publisher" (More info, Run anyway) and on a Mac you open it the first time with right-click, Open. The Windows
-exe unpacks itself on start, so allow a few seconds before the window appears.
+Get the latest release from the [Releases page](https://github.com/synrais/PC-Audio-Scope/releases/latest):
 
-Or run it from the source, below.
+| platform | download | |
+|---|---|---|
+| Windows 10 / 11 | [PC-Audio-Scope.exe](https://github.com/synrais/PC-Audio-Scope/releases/latest/download/PC-Audio-Scope.exe) | one file, nothing to install |
+| macOS (Apple Silicon, experimental) | [PC-Audio-Scope-macOS.zip](https://github.com/synrais/PC-Audio-Scope/releases/latest/download/PC-Audio-Scope-macOS.zip) | see [macOS](#macos-experimental) below |
+| any system with Python | [source code](https://github.com/synrais/PC-Audio-Scope) | see [Run from the source](#run-from-the-source) |
+
+Older versions are on the [Releases page](https://github.com/synrais/PC-Audio-Scope/releases).
+
+Put the Windows exe in its own folder, because it keeps your recordings next to itself. Both downloads are unsigned: Windows
+SmartScreen may say "unknown publisher" (More info, Run anyway) and on a Mac you open the app the first time with
+right-click, Open. The Windows exe unpacks itself on start, so allow a few seconds before the window appears.
 
 ## What it does
 
@@ -123,7 +130,7 @@ pyinstaller packaging/pc_audio_scope.spec --noconfirm
 gives `dist/PC Audio Scope.exe` on Windows and `dist/PC Audio Scope.app` on a Mac (PyInstaller builds for the system it runs
 on). `PC Audio Scope.exe --check report.txt` starts it hidden for a few seconds on the real sound card and writes a one-line
 report. The workflow in `.github/workflows/build.yml` does both builds on GitHub's machines: run it from the Actions tab, or
-push a tag such as `v1.0` to publish a release with the two files attached. The icon is drawn by `packaging/make_icon.py`.
+push a tag such as `v1.0` to publish a release with `PC-Audio-Scope.exe` and `PC-Audio-Scope-macOS.zip` attached. The icon is drawn by `packaging/make_icon.py`.
 
 ## Layout
 
