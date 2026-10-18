@@ -1,0 +1,47 @@
+name: build
+
+# Builds the Windows exe and the macOS app on GitHub's own machines.
+# Run it by hand (Actions tab -> build -> Run workflow), then download the two files from the finished run and put them in releases/.
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install
+        run: python -m pip install -r requirements.txt pyinstaller
+      - name: Tests that need no sound card
+        shell: bash
+        run: |
+          python tests/dsp.py
+          python tests/clips.py
+      - name: Build
+        run: pyinstaller packaging/pc_audio_scope.spec --noconfirm
+      - name: Check that the Windows exe starts
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath "dist/PC Audio Scope.exe" -ArgumentList "--check","check.txt" -Wait -PassThru
+          Get-Content check.txt
+          if ($p.ExitCode -ne 0) { exit 1 }
+      - name: Package
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cp "dist/PC Audio Scope.exe" PC-Audio-Scope.exe
+          else
+            (cd dist && ditto -c -k --keepParent "PC Audio Scope.app" ../PC-Audio-Scope-macOS.zip)
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PC-Audio-Scope-${{ runner.os }}
+          path: PC-Audio-Scope*
