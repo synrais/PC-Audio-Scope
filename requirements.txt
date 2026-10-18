@@ -1,0 +1,6 @@
+numpy>=1.26
+scipy>=1.15
+SoundCard>=0.4.3
+sounddevice>=0.5
+comtypes>=1.4; sys_platform == "win32"
+Pillow>=10.0
