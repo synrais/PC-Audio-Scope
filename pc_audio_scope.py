@@ -2036,7 +2036,7 @@ class App:
         self.status = t(10, 8, '', size=10)
         self.dc_txt = t(985, 28, '', zoom is not None)
         t(10, 28, 'OSCILLOSCOPE   left = %s, right = %s' % (self.th.lname, self.th.rname), hid('osc'))
-        t(311 if zoom == 'vec' else 625, 28, 'VECTORSCOPE  (left across, right up)', hid('vec'))
+        t(311 if zoom == 'vec' else 625, 28, 'VECTORSCOPE', hid('vec'))
         t(916, 28, 'LEVELS', zoom is not None)
         self.spec_title = t(10, 28 if zoom == 'spec' else 336, 'SPECTRUM', hid('spec'))
         self.hist_title = t(10 if zoom == 'hist' else 625, 28 if zoom == 'hist' else 336, 'LEVEL HISTORY', hid('hist'))
@@ -2062,17 +2062,24 @@ class App:
         self.bar_xs = (S(993) + mx, S(1103) + mx)  # the two level bars are centred on the balance bar (S(1073)), with the dB scale between them
         self.met_item = c.create_image(x0 + 1, y0 + 1, anchor='nw')  # the bars are a picture (see beam_plot): glowing, like the graphs
         self.met_geom = None
-        for i, xb in enumerate(self.bar_xs):
-            c.create_text(xb + S(25), y0 + S(4), text='LR'[i], fill=(self.CL, self.CR)[i], font=self.F(10), anchor='n')
-        for dd in (0, -6, -12, -24, -48):
+        nfont = tkfont.Font(root=self.root, font=self.F(8))
+        wm, w2 = nfont.measure('-'), nfont.measure('48')
+        col_x = self.bal_x - (wm + w2) / 2.0 + wm  # the first digit of every number of the dB scale starts here (the 0, the 6 of -6, the 1 of -12 ...), the minus signs hang to its left
+        for dd in (0, -6, -12, -24, -48):  # each number sits on its line, which runs out to the bars on both sides of it
             yy = y0 + S(20) + (-dd) / 60.0 * self.bar_h
-            c.create_line(S(1056) + mx, yy, S(1090) + mx, yy, fill=(self.th.peak if dd == 0 else self.GRID))
-            c.create_text(S(1073) + mx, yy - S(5), text='%d' % dd, fill=(self.th.peak if dd == 0 else self.TXT), font=self.F(8), anchor='n')
-        self.m_txt = c.create_text(S(924) + mx, y0 + S(118), text='', fill=self.TXT, font=self.F(9), anchor='nw')
-        self.bal_y = y0 + S(240)  # the balance bar; the figure and the LEFT / RIGHT words are above it
-        self.bal_lbl = c.create_text(S(924) + mx, self.bal_y - S(40), text='', fill=self.TXT, font=self.F(9), anchor='nw')
-        c.create_text(S(934) + mx, self.bal_y - S(22), text='LEFT', fill=self.CL, font=self.F(8), anchor='nw')
-        c.create_text(S(1212) + mx, self.bal_y - S(22), text='RIGHT', fill=self.CR, font=self.F(8), anchor='ne')
+            col = self.th.peak if dd == 0 else self.GRID
+            digits = str(abs(dd))
+            c.create_line(self.bar_xs[0] + S(54), yy, col_x - S(3) - (wm if dd < 0 else 0), yy, fill=col)  # the 0 has no minus sign, so its line runs on to the digit
+            c.create_line(col_x + nfont.measure(digits) + S(3), yy, self.bar_xs[1] - S(4), yy, fill=col)
+            c.create_text(col_x, yy, text=digits, fill=(self.th.peak if dd == 0 else self.TXT), font=self.F(8), anchor='w')
+            if dd < 0:
+                c.create_text(col_x, yy, text='-', fill=self.TXT, font=self.F(8), anchor='e')
+        # the text is one block at the bottom of the panel, the balance figure its last line; the balance bar hangs on the level of the vectorscope's centre line, between the level bars and the text
+        lh = tkfont.Font(root=self.root, font=self.F(9)).metrics('linespace')
+        txt_top = y1 - S(8) - 5 * lh - S(4)
+        self.m_txt = c.create_text(S(924) + mx, txt_top, text='', fill=self.TXT, font=self.F(9), anchor='nw')
+        self.bal_y = int(round((y0 + y1) / 2.0))  # level of the vectorscope's centre line (it has the same top and bottom as this panel)
+        self.bal_lbl = c.create_text(S(924) + mx, txt_top + 4 * lh + S(4), text='', fill=self.TXT, font=self.F(9), anchor='nw')
         # spectrum (tag 'spec') and spectrogram (tag 'sg')
         x0, y0, x1, y1 = self.P['spec']
         sfont = tkfont.Font(root=self.root, font=self.F(8))

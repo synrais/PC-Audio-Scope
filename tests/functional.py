@@ -66,9 +66,29 @@ app.cap.eq_note = ''
 pump(root, 0.3)
 check('...and it does not when there is none', 'Equalizer' not in app.c.itemcget(app.status, 'text'))
 check('the U key is for the undoing of the equaliser (the capture has the switch, on by default)', app.cap.undo_eq is True)
+from tkinter import font as tkfont_
+nf_ = tkfont_.Font(root=root, font=app.F(8))
+wm_, w2_ = nf_.measure('-'), nf_.measure('48')
 bar_mid = (app.bar_xs[0] + app.bar_xs[1] + app.S(50)) / 2.0
-scale_x = {app.c.coords(i)[0] for i in app.c.find_all() if app.c.type(i) == 'text' and app.c.itemcget(i, 'text') in ('0', '-6', '-12', '-24', '-48') and app.c.itemcget(i, 'anchor') == 'n'}
-check('the level bars are centred on the balance bar: the middle of the pair and the dB numbers between them sit on its centre line', abs(bar_mid - app.bal_x) <= 1 and scale_x == {float(app.bal_x)}, (bar_mid, app.bal_x, scale_x))
+scale_x = {app.c.coords(i)[0] for i in app.c.find_all() if app.c.type(i) == 'text' and app.c.itemcget(i, 'text') in ('0', '6', '12', '24', '48') and app.c.itemcget(i, 'anchor') == 'w'}
+check('the level bars are centred on the balance bar; the first digits of the dB numbers between them (0, the 6 of -6, the 1 of -12 ...) are in one column, with the widest number centred on it',
+      abs(bar_mid - app.bal_x) <= 1 and len(scale_x) == 1 and abs(next(iter(scale_x)) - (app.bal_x - (wm_ + w2_) / 2.0 + wm_)) < 0.6, (bar_mid, app.bal_x, scale_x))
+ticks = {}
+for i in app.c.find_all():
+    if app.c.type(i) == 'text' and app.c.itemcget(i, 'text') in ('0', '6', '12', '24', '48') and app.c.itemcget(i, 'anchor') == 'w':
+        ticks[app.c.itemcget(i, 'text')] = (app.c.coords(i)[1], sorted(round(app.c.coords(j)[2 if app.c.coords(j)[0] < scale_x.copy().pop() else 0], 1) for j in app.c.find_all() if app.c.type(j) == 'line' and abs(app.c.coords(j)[1] - app.c.coords(i)[1]) < 0.01 and abs(app.c.coords(j)[3] - app.c.coords(i)[1]) < 0.01))
+minus = [i for i in app.c.find_all() if app.c.type(i) == 'text' and app.c.itemcget(i, 'text') == '-' and app.c.itemcget(i, 'anchor') == 'e']
+check('each dB number sits on its line (a line to the left and one to the right of it, the 0 line running on to the digit), the minus signs hang left of the column, and the lines are where the bars say that level is',
+      sorted(ticks) == sorted(['0', '6', '12', '24', '48']) and all(len(v[1]) == 2 for v in ticks.values()) and len(minus) == 4 and abs(ticks['6'][0] - ticks['0'][0] - 0.1 * app.bar_h) < 0.6 and abs(ticks['48'][0] - ticks['0'][0] - 0.8 * app.bar_h) < 0.6
+      and abs(ticks['0'][1][0] - (next(iter(scale_x)) - app.S(3))) < 0.6 and ticks['6'][1][0] < ticks['0'][1][0], ticks)
+mx0, my0, mx1, my1 = app.P['met']
+txt_bb, lbl_bb = app.c.bbox(app.m_txt), app.c.bbox(app.bal_lbl)
+bars_bottom = app.bar_top + app.bar_h
+check('the text is one block at the bottom of the panel (the balance figure its last line, just above the bottom line), and the balance bar is level with the centre line of the vectorscope (between the level bars and the text)',
+      my1 - lbl_bb[3] < app.S(14) and lbl_bb[3] <= my1 and lbl_bb[1] > txt_bb[3] - app.S(8) and abs(app.bal_y - (app.P['vec'][1] + app.P['vec'][3]) / 2.0) <= 1 and bars_bottom < app.bal_y - app.S(5) and app.bal_y + app.S(5) < txt_bb[1], (txt_bb, lbl_bb, my1, app.bal_y, bars_bottom, app.P['vec']))
+all_text = [(app.c.itemcget(i, 'text'), app.c.coords(i)[0]) for i in app.c.find_all() if app.c.type(i) == 'text']
+check('the levels panel has no L, R, LEFT or RIGHT words and the vectorscope title is just its name',
+      not [t_ for t_, x_ in all_text if t_ in ('L', 'R', 'LEFT', 'RIGHT') and x_ >= app.P['met'][0]] and 'VECTORSCOPE' in [t_ for t_, _ in all_text] and not any('left across' in t_ for t_, _ in all_text), [t_ for t_, _ in all_text if len(t_) < 8][:20])
 check('live: no correlation meter any more', not hasattr(app, 'cor_lbl') and not hasattr(app, 'cor_mark') and not any('correlation' in app.c.itemcget(i, 'text') for i in app.c.find_all() if app.c.type(i) == 'text'))
 check('clip row hidden while live', app.clip_row.winfo_manager() == '' and app.cmp_row.winfo_manager() == '', (app.clip_row.winfo_manager(), app.cmp_row.winfo_manager()))
 
