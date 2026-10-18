@@ -66,6 +66,9 @@ app.cap.eq_note = ''
 pump(root, 0.3)
 check('...and it does not when there is none', 'Equalizer' not in app.c.itemcget(app.status, 'text'))
 check('the U key is for the undoing of the equaliser (the capture has the switch, on by default)', app.cap.undo_eq is True)
+bar_mid = (app.bar_xs[0] + app.bar_xs[1] + app.S(50)) / 2.0
+scale_x = {app.c.coords(i)[0] for i in app.c.find_all() if app.c.type(i) == 'text' and app.c.itemcget(i, 'text') in ('0', '-6', '-12', '-24', '-48') and app.c.itemcget(i, 'anchor') == 'n'}
+check('the level bars are centred on the balance bar: the middle of the pair and the dB numbers between them sit on its centre line', abs(bar_mid - app.bal_x) <= 1 and scale_x == {float(app.bal_x)}, (bar_mid, app.bal_x, scale_x))
 check('live: no correlation meter any more', not hasattr(app, 'cor_lbl') and not hasattr(app, 'cor_mark') and not any('correlation' in app.c.itemcget(i, 'text') for i in app.c.find_all() if app.c.type(i) == 'text'))
 check('clip row hidden while live', app.clip_row.winfo_manager() == '' and app.cmp_row.winfo_manager() == '', (app.clip_row.winfo_manager(), app.cmp_row.winfo_manager()))
 

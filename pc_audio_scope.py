@@ -2059,15 +2059,15 @@ class App:
         self.bal_x = S(1073) + mx
         self.bar_h = S(90)
         self.bar_top = y0 + S(20)
-        self.bar_xs = (S(946) + mx, S(1056) + mx)
+        self.bar_xs = (S(993) + mx, S(1103) + mx)  # the two level bars are centred on the balance bar (S(1073)), with the dB scale between them
         self.met_item = c.create_image(x0 + 1, y0 + 1, anchor='nw')  # the bars are a picture (see beam_plot): glowing, like the graphs
         self.met_geom = None
         for i, xb in enumerate(self.bar_xs):
             c.create_text(xb + S(25), y0 + S(4), text='LR'[i], fill=(self.CL, self.CR)[i], font=self.F(10), anchor='n')
         for dd in (0, -6, -12, -24, -48):
             yy = y0 + S(20) + (-dd) / 60.0 * self.bar_h
-            c.create_line(S(1010) + mx, yy, S(1044) + mx, yy, fill=(self.th.peak if dd == 0 else self.GRID))
-            c.create_text(S(1027) + mx, yy - S(5), text='%d' % dd, fill=(self.th.peak if dd == 0 else self.TXT), font=self.F(8), anchor='n')
+            c.create_line(S(1056) + mx, yy, S(1090) + mx, yy, fill=(self.th.peak if dd == 0 else self.GRID))
+            c.create_text(S(1073) + mx, yy - S(5), text='%d' % dd, fill=(self.th.peak if dd == 0 else self.TXT), font=self.F(8), anchor='n')
         self.m_txt = c.create_text(S(924) + mx, y0 + S(118), text='', fill=self.TXT, font=self.F(9), anchor='nw')
         self.bal_y = y0 + S(240)  # the balance bar; the figure and the LEFT / RIGHT words are above it
         self.bal_lbl = c.create_text(S(924) + mx, self.bal_y - S(40), text='', fill=self.TXT, font=self.F(9), anchor='nw')
