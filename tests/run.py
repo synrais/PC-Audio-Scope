@@ -4,7 +4,7 @@ import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SCRIPTS = ['dsp.py', 'clips.py', 'findings.py', 'functional.py', 'flat_buttons.py', 'live_compare.py', 'window_fit.py', 'beam.py']
+SCRIPTS = ['dsp.py', 'clips.py', 'findings.py', 'functional.py', 'flat_buttons.py', 'live_compare.py', 'window_fit.py', 'beam.py', 'eqapo.py']
 
 bad = []
 for name in SCRIPTS:

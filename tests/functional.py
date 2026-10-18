@@ -16,7 +16,7 @@ root.withdraw()
 app = m.App(root, cap)
 
 # ---- every documented key is bound
-keys = ['<space>', '<F5>', 'c', 'r', 'l', '<Control-o>', 'g', 'f', 'm', '<Delete>', '<Prior>', '<Next>', 'i', 'o', 'x', 'p', 'e', '1', '2', '3',
+keys = ['<space>', '<F5>', 'c', 'r', 'u', 'l', '<Control-o>', 'g', 'f', 'm', '<Delete>', '<Prior>', '<Next>', 'i', 'o', 'x', 'p', 'e', '1', '2', '3',
         '<Left>', '<Right>', '<Shift-Left>', '<Alt-Left>', '<Alt-Shift-Left>', '<Alt-Control-Left>', '<Home>', '<End>', 'q', '<Escape>']
 check('all documented keys are bound', all(root.bind(k) for k in keys), [k for k in keys if not root.bind(k)])
 check('the scope gain controls are gone: their keys are unbound and nothing of them is left', not any(root.bind(k) for k in ('<plus>', '<equal>', '<minus>', 'a')) and not callable(getattr(app, 'zoom', None)) and not hasattr(app, 'b_auto') and not hasattr(app, 'auto'))
@@ -59,6 +59,13 @@ check('the balance label is just "balance"', bal_txt.startswith('balance ') and 
 check('the balance shows both channels at once: the left bar grows to the left of the centre, the right bar to the right, each by its own level', len_l > 0 and len_r > 0 and bl[2] == app.bal_x and br[0] == app.bal_x, (bl, br, app.bal_x))
 check('a positive balance figure means the left is louder, so its bar is the longer one', (bal_n > 0.05 and len_l > len_r) or (bal_n < -0.05 and len_r > len_l) or abs(bal_n) <= 0.05, (bal_txt, len_l, len_r))
 check('vectorscope: the picture of a beam screen is drawn from the sound', app.beam is not None and app.photos.get('vec') is not None and float(app.beam.buf.max()) > 0 and bool(app.c.itemcget(app.vec_item, 'image')), (app.beam is not None, app.photos.get('vec') is not None))
+app.cap.eq_note = 'Equalizer APO undone'
+pump(root, 0.3)
+check('the status line says when a system equaliser is being undone, and only then', 'Equalizer APO undone' in app.c.itemcget(app.status, 'text'), app.c.itemcget(app.status, 'text'))
+app.cap.eq_note = ''
+pump(root, 0.3)
+check('...and it does not when there is none', 'Equalizer' not in app.c.itemcget(app.status, 'text'))
+check('the U key is for the undoing of the equaliser (the capture has the switch, on by default)', app.cap.undo_eq is True)
 check('live: no correlation meter any more', not hasattr(app, 'cor_lbl') and not hasattr(app, 'cor_mark') and not any('correlation' in app.c.itemcget(i, 'text') for i in app.c.find_all() if app.c.type(i) == 'text'))
 check('clip row hidden while live', app.clip_row.winfo_manager() == '' and app.cmp_row.winfo_manager() == '', (app.clip_row.winfo_manager(), app.cmp_row.winfo_manager()))
 

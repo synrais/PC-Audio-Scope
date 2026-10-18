@@ -9,6 +9,7 @@ import json
 import math
 import os
 import queue
+import re
 import struct
 import sys
 import threading
@@ -1166,6 +1167,189 @@ THEMES = [
 ]
 
 
+# ---------------------------------------------------------------- undoing a system equaliser (Equalizer APO)
+# Windows loopback records the sound after the audio engine's stream effects, so an equaliser such as Equalizer APO is IN what the scope hears.  A headphone correction curve is full of
+# phase shifts, and the pictures of oscilloscope music (which depend on every frequency arriving on time) come out bent.  The parametric filters in the Equalizer APO configuration
+# of the output are read here and undone with their exact inverse (every peaking and shelf filter is minimum phase, so the inverse is stable).
+EQ_UNDOABLE = ('PK', 'PEQ', 'LSC', 'HSC')
+
+
+def eq_biquad(kind, fs, fc, gain_db, q):
+    """the coefficients (b, a with a[0] = 1) of an Equalizer APO peaking or shelving filter (the RBJ cookbook forms with a Q)"""
+    w0 = 2 * math.pi * fc / fs
+    A = 10 ** (gain_db / 40.0)
+    alpha = math.sin(w0) / (2.0 * q)
+    cw = math.cos(w0)
+    if kind in ('PK', 'PEQ'):
+        b, a = (1 + alpha * A, -2 * cw, 1 - alpha * A), (1 + alpha / A, -2 * cw, 1 - alpha / A)
+    else:
+        sq = 2 * math.sqrt(A) * alpha
+        if kind == 'LSC':
+            b = (A * ((A + 1) - (A - 1) * cw + sq), 2 * A * ((A - 1) - (A + 1) * cw), A * ((A + 1) - (A - 1) * cw - sq))
+            a = ((A + 1) + (A - 1) * cw + sq, -2 * ((A - 1) + (A + 1) * cw), (A + 1) + (A - 1) * cw - sq)
+        else:  # HSC
+            b = (A * ((A + 1) + (A - 1) * cw + sq), -2 * A * ((A - 1) + (A + 1) * cw), A * ((A + 1) + (A - 1) * cw - sq))
+            a = ((A + 1) - (A - 1) * cw + sq, 2 * ((A - 1) - (A + 1) * cw), (A + 1) - (A - 1) * cw - sq)
+    return np.array(b) / a[0], np.array(a) / a[0]
+
+
+def eq_response(filters, preamp_db, fs, f):
+    """the complex response of the equaliser (a preamp and a cascade of filters) at the frequencies f, for an audio engine running at fs"""
+    z = np.exp(-1j * 2 * np.pi * np.asarray(f, dtype=np.float64) / fs)
+    h = np.full(len(z), 10 ** (preamp_db / 20.0), dtype=np.complex128)
+    for kind, fc, gain, q in filters:
+        b, a = eq_biquad(kind, fs, fc, gain, q)
+        h *= (b[0] + b[1] * z + b[2] * z ** 2) / (1 + a[1] * z + a[2] * z ** 2)
+    return h
+
+
+def eq_inverse_fir(preamp_db, filters, mix_rate, out_rate=SR, taps=4096):
+    """the FIR filter (at out_rate, the rate of the capture) that undoes the equaliser the audio engine ran at mix_rate.  Its magnitude is the exact inverse of the equaliser's and it is
+    built minimum phase (from the cepstrum), which is what the inverse of a cascade of peaking and shelf filters is"""
+    n = 65536
+    f = np.arange(n // 2 + 1) * float(out_rate) / n
+    mag = np.ones(len(f))
+    ok = f < mix_rate / 2.0  # above the engine's own Nyquist frequency there is nothing to undo
+    mag[ok] = 1.0 / np.abs(eq_response(filters, preamp_db, float(mix_rate), f[ok]))
+    c = np.fft.irfft(np.log(mag), n)  # the cepstrum of the magnitude; folding it makes the filter causal
+    folded = np.zeros(n)
+    folded[0] = c[0]
+    folded[1:n // 2] = 2 * c[1:n // 2]
+    folded[n // 2] = c[n // 2]
+    h = np.fft.ifft(np.exp(np.fft.fft(folded))).real[:taps]
+    fade = taps // 4
+    h[-fade:] *= 0.5 * (1 + np.cos(np.pi * np.arange(fade) / fade))  # the last quarter fades out; the rest is untouched
+    return h
+
+
+class StreamFir:
+    """a FIR filter for a stream of blocks (each channel on its own): the answer to a block is the same as if the whole stream had been filtered in one go"""
+
+    def __init__(self, taps, channels=2):
+        self.fir = _Fir(taps)
+        self.keep = len(taps) - 1
+        self.hist = np.zeros((self.keep, channels))
+
+    def process(self, blk):
+        x = np.concatenate([self.hist, np.asarray(blk, dtype=np.float64)], axis=0)
+        self.hist = x[len(x) - self.keep:]
+        return np.stack([self.fir.valid(x[:, c]) for c in range(x.shape[1])], axis=1).astype(np.float32)
+
+
+def eq_device_match(selector, endpoint_id, endpoint_name):
+    """does a `Device:` selector of Equalizer APO (all, a part of the name, or a name with the {guid} of the endpoint) select this output?"""
+    sel = selector.strip()
+    if sel.lower() == 'all':
+        return True
+    guid = re.search(r'[{]([0-9a-fA-F-]{36})[}]', sel)
+    if guid:
+        return guid.group(1).lower() in endpoint_id.lower()
+    words = [w for w in re.split(r'[^a-z0-9]+', sel.lower()) if w]
+    name = endpoint_name.lower()
+    return bool(words) and all(w in name for w in words)
+
+
+def eqapo_read(path, endpoint_id, endpoint_name, out, active=True, depth=0):
+    """reads an Equalizer APO configuration file (and what it includes) for one output: out gets the preamp, the filters, the things it cannot undo and the files it read"""
+    try:
+        lines = open(path, encoding='utf-8', errors='replace').read().splitlines()
+        out['files'].append((path, os.path.getmtime(path)))
+    except OSError:
+        return active
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith('#'):
+            continue
+        key, _, val = line.partition(':')
+        k = re.sub(r'[ 0-9]+$', '', key.strip().lower())  # 'Filter 3' is a Filter
+        if k == 'device':
+            active = any(eq_device_match(sel, endpoint_id, endpoint_name) for sel in val.split(';'))
+        elif not active:
+            continue
+        elif k == 'include' and depth < 8:
+            target = val.strip()
+            target = target if os.path.isabs(target) else os.path.join(os.path.dirname(path), target)
+            active = eqapo_read(target, endpoint_id, endpoint_name, out, active, depth + 1)
+        elif k in ('preamp', 'gain'):
+            g = re.search(r'-?[0-9.]+', val)
+            if g:
+                out['preamp'] += float(g.group(0))
+        elif k == 'filter':
+            m_ = re.match(r'\s*(ON|OFF)\s+([A-Za-z]+)(.*)', val, re.I)
+            if not m_:
+                out['unsupported'].append(line[:40])
+            elif m_.group(1).upper() == 'ON':
+                kind, rest = m_.group(2).upper(), m_.group(3)
+                fc, gn, q = (re.search(r'\b%s\s+(-?[0-9.]+)' % tag, rest, re.I) for tag in ('Fc', 'Gain', 'Q'))
+                if kind in EQ_UNDOABLE and fc and gn and q:
+                    out['filters'].append(('PK' if kind == 'PEQ' else kind, float(fc.group(1)), float(gn.group(1)), float(q.group(1))))
+                else:
+                    out['unsupported'].append('Filter ' + kind)
+        else:
+            out['unsupported'].append(k)
+    return active
+
+
+def eqapo_config_dir():
+    """where Equalizer APO keeps its configuration, or None"""
+    if not WINDOWS:
+        return None
+    try:
+        import winreg
+        for view in (winreg.KEY_WOW64_64KEY, winreg.KEY_WOW64_32KEY):
+            try:
+                with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, 'SOFTWARE' + chr(92) + 'EqualizerAPO', 0, winreg.KEY_READ | view) as key:
+                    path = winreg.QueryValueEx(key, 'InstallPath')[0]
+                    if os.path.isdir(os.path.join(path, 'config')):
+                        return os.path.join(path, 'config')
+            except OSError:
+                continue
+    except Exception:
+        pass
+    for base in (os.environ.get('ProgramFiles', 'C:' + chr(92) + 'Program Files'), os.environ.get('ProgramFiles(x86)', '')):
+        if base and os.path.isdir(os.path.join(base, 'EqualizerAPO', 'config')):
+            return os.path.join(base, 'EqualizerAPO', 'config')
+    return None
+
+
+def mix_rate_from_blob(blob):
+    """the sample rate in an endpoint's device format (a PROPVARIANT blob in the registry: 8 bytes of header, then a WAVEFORMATEX); 48000 when it cannot be read"""
+    try:
+        return int(struct.unpack_from('<I', blob, 12)[0]) or 48000
+    except Exception:
+        return 48000
+
+
+def endpoint_mix_rate(endpoint_id):
+    """the sample rate the Windows audio engine mixes this output at"""
+    guid = re.search(r'[{]([0-9a-fA-F-]{36})[}]', endpoint_id or '')
+    if not (WINDOWS and guid):
+        return 48000
+    try:
+        import winreg
+        path = 'SOFTWARE' + chr(92) + 'Microsoft' + chr(92) + 'Windows' + chr(92) + 'CurrentVersion' + chr(92) + 'MMDevices' + chr(92) + 'Audio' + chr(92) + 'Render' + chr(92) + '{%s}' % guid.group(1) + chr(92) + 'Properties'
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, path, 0, winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as key:
+            return mix_rate_from_blob(winreg.QueryValueEx(key, '{f19f064d-082c-4e27-bc73-6882a1bb8e4c},0')[0])
+    except Exception:
+        return 48000
+
+
+def eq_undo_for(endpoint_id, endpoint_name, config_dir=None, mix_rate=None):
+    """-> (StreamFir or None, what to say, [(file, modification time)]): the filter that undoes the Equalizer APO equaliser on this output.  Nothing is undone when the equaliser uses
+    anything that is not a peaking or shelf filter (the sound would only be half corrected)"""
+    cdir = config_dir or eqapo_config_dir()
+    if not cdir:
+        return None, '', []
+    out = dict(preamp=0.0, filters=[], unsupported=[], files=[])
+    eqapo_read(os.path.join(cdir, 'config.txt'), endpoint_id or '', endpoint_name or '', out)
+    if not out['filters'] and not out['unsupported'] and out['preamp'] == 0.0:
+        return None, '', out['files']
+    if out['unsupported']:
+        return None, 'Equalizer APO is in the sound (%s: not undone)' % ', '.join(sorted(set(out['unsupported']))[:3]), out['files']
+    rate = mix_rate or endpoint_mix_rate(endpoint_id)
+    return StreamFir(eq_inverse_fir(out['preamp'], out['filters'], rate)), 'Equalizer APO undone', out['files']
+
+
 def fmt_time(t, fine=False):
     sign = '-' if t < 0 else ''
     m, s = divmod(abs(t), 60.0)
@@ -1322,6 +1506,8 @@ class Capture(threading.Thread):
         self.now = None  # what is open
         self.warn = ''
         self.refresh_req = True
+        self.undo_eq = True  # undo a system equaliser (Equalizer APO) in the output's audio path
+        self.eq_note = ''  # what to tell about it
 
     def push(self, blk):
         n = len(blk)
@@ -1450,6 +1636,8 @@ class Capture(threading.Thread):
                         ev = None
                 else:
                     self.vol = None  # a microphone has no Windows output volume to add back
+                eq_fir, eq_note, eq_key = None, '', None
+                self.eq_note = ''
                 try:
                     ch = 2 if getattr(mic, 'channels', 2) >= 2 else 1
                     with mic.recorder(samplerate=SR, channels=ch, blocksize=BLOCK) as rec:
@@ -1460,7 +1648,16 @@ class Capture(threading.Thread):
                                 blk = blk[:, None]
                             if blk.shape[1] == 1:
                                 blk = np.repeat(blk, 2, axis=1)
-                            self.push(blk[:, :2])
+                            blk = blk[:, :2]
+                            if loop and (eq_key is None or (k % 100 == 0 and eq_key[1] != [os.path.getmtime(f_) if os.path.exists(f_) else 0 for f_, _ in eq_key[2]]) or eq_key[0] != self.undo_eq):
+                                eq_fir, eq_note, eq_files = eq_undo_for(opened, label)  # (again when the equaliser's files have changed, or the switch has been used)
+                                eq_key = (self.undo_eq, [t_ for _, t_ in eq_files], eq_files)
+                                if not self.undo_eq:
+                                    eq_fir, eq_note = None, ('Equalizer APO is in the sound (U undoes it)' if eq_note else '')
+                                self.eq_note = eq_note
+                            if eq_fir is not None:
+                                blk = eq_fir.process(blk)
+                            self.push(blk)
                             k += 1
                             if ev is not None and k % 50 == 1:
                                 try:
@@ -2130,6 +2327,7 @@ class App:
             kb('<Command-o>', self.open_clip, True)
         kb('g', lambda: self.set_spec_mode('spectrogram' if self.spec_mode == 'spectrum' else 'spectrum'))
         kb('t', self.cycle_theme)
+        kb('u', lambda: setattr(self.cap, 'undo_eq', not self.cap.undo_eq))
         kb('f', self.find_problems_key)
         kb('m', self.marker_add)
         kb('<Delete>', self.marker_delete)
@@ -3213,7 +3411,7 @@ class App:
                 hist = [cap.hist[i] for i in range(-min(10, len(cap.hist)), 0)]
                 sess = list(cap.sess)
                 flat = list(cap.flat)
-            devtxt = cap.device + ((' - ' + cap.warn) if cap.warn else '')
+            devtxt = cap.device + ((' - ' + cap.warn) if cap.warn else '') + (('  ' + cap.eq_note) if cap.eq_note else '')
         recent = hist[-10:] or [(0.0, 0.0)]
         now_pk = [max(h[i] for h in recent) for i in (0, 1)]
         dbn = [db(v_) + cd for v_ in now_pk]

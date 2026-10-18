@@ -132,6 +132,7 @@ can be resized; everything scales with it, and the size, position and settings a
 | `G` | spectrum / spectrogram |
 | `T` | next theme |
 | `C` | ignore the Windows volume in the levels, until the program is closed (see below) |
+| `U` | switch the undoing of a system equaliser (Equalizer APO) on or off (see below) |
 | `R` | reset the peaks (session peak, held peaks, clipped-block counts) |
 | `1` `2` `3` | listen to A / B / the difference while comparing |
 | `Alt+Left` `Alt+Right` | nudge the chosen clip 10 ms (`Alt+Shift` 1 ms, `Alt+Ctrl` 100 ms) |
@@ -145,6 +146,12 @@ levels as measured. Press `C` to ignore the Windows volume instead: it is added 
 the program produced (this lasts until the program is closed). Recordings remember the volume they were taken at, and
 playback undoes the current volume the same way, so a clip plays about as loud as it was heard, never above full scale.
 A muted output is shown in the status line.
+
+**System equalisers.** Windows loopback records the sound *after* the stream effects of the audio engine, so an equaliser such as [Equalizer APO](https://sourceforge.net/projects/equalizerapo/)
+(a headphone correction curve, for example) is in what the scope hears. Such a curve is full of phase shifts, which bends the pictures of oscilloscope music in the vectorscope.
+The scope reads the Equalizer APO configuration of the output it is capturing (`config.txt`, its `Include:` files and `Device:` lines) and, when all of it is peaking or shelf filters
+(`PK`, `LSC`, `HSC`) and a preamp, undoes it with the exact inverse; the status line then says *Equalizer APO undone*. If the configuration holds anything else (a low-pass, a plugin, a
+convolution) nothing is undone and the status line says so. `U` switches it off, to see the sound as the headphones get it.
 
 The loudness figures use the BS.1770 K-weighting; a stereo 997 Hz sine at -20 dBFS reads -20.0 LUFS (see `tests/dsp.py`).
 
