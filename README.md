@@ -95,9 +95,9 @@ DC offset differs, one channel differs, different sound). The same functions are
 
 ## Themes
 
-`T` (or the *Theme* button) rolls through the colour schemes: the classic red and yellow, four single-colour phosphor
-screens (green, amber, blue, red; the right channel is the paler shade) and three two-colour ones that keep the channels
-easy to tell apart (orange + blue, green + magenta, red + cyan). Everything is tinted to match, including the
+`T` (or the *Theme* button) rolls through the colour schemes: the classic yellow and red, four single-colour phosphor
+screens (green, amber, blue, red; the left channel is the paler shade, the right the stronger one) and three two-colour ones that keep the channels
+easy to tell apart (blue + orange, green + magenta, cyan + red). Everything is tinted to match, including the
 spectrogram, and the traces glow. The choice is remembered.
 
 ![themes](docs/themes.png)

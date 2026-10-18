@@ -162,7 +162,33 @@ check('the window uses the program icon (the same drawing as the icon of the fil
 
 # ---- click a scope: it fills the whole scope area; click again: all of them are back
 from types import SimpleNamespace as Ev0
-check('it takes a double click: the canvas answers <Double-Button-1> and a single click does nothing', bool(app.c.bind('<Double-Button-1>')) and not app.c.bind('<Button-1>'), (app.c.bind('<Double-Button-1>'), app.c.bind('<Button-1>')))
+import time as time_
+check("the canvas counts the double clicks itself (a press handler; Tk's own <Double-Button-1> would also fire for the third and fourth quick click)", bool(app.c.bind('<Button-1>')) and not app.c.bind('<Double-Button-1>'), (app.c.bind('<Double-Button-1>'), app.c.bind('<Button-1>')))
+app.dbl_time = 0.3
+x_, y_ = ((app.P['osc'][0] + app.P['osc'][2]) // 2, (app.P['osc'][1] + app.P['osc'][3]) // 2)
+ev_ = Ev0(x=x_, y=y_)
+app.click_last = None
+app.scope_press(ev_)
+check('a single click does nothing', app.zoom is None, app.zoom)
+app.scope_press(ev_)
+check('a double click enlarges the scope', app.zoom == 'osc', app.zoom)
+app.scope_press(ev_)
+check('a quick third click does not undo it (the second click of the double click was used up)', app.zoom == 'osc', app.zoom)
+app.scope_press(ev_)
+check('...but a quick fourth click makes a new double click with the third: the scope is small again', app.zoom is None, app.zoom)
+app.scope_press(ev_)
+app.scope_press(ev_)
+app.scope_press(ev_)
+check('click, click, click makes it big and leaves it big, however fast', app.zoom == 'osc', app.zoom)
+time_.sleep(0.4)
+app.scope_press(ev_)
+check('a click that waited longer than the double-click time is a first click again (it takes a double click to go back)', app.zoom == 'osc', app.zoom)
+app.scope_press(ev_)
+check('...and the double click after it puts the scope back', app.zoom is None, app.zoom)
+app.click_last = None
+app.dbl_time = m.double_click_time()
+check("the double-click time is the system's (or half a second)", 0.2 <= app.dbl_time <= 2.0, app.dbl_time)
+app.click_last = None
 normal_P, normal_frame = dict(app.P), dict(app.panel_frame)
 mid = lambda n: ((app.P[n][0] + app.P[n][2]) // 2, (app.P[n][1] + app.P[n][3]) // 2)
 for name in ('osc', 'vec', 'spec', 'hist'):

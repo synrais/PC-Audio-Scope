@@ -36,6 +36,21 @@ app.go_live()
 pump(root, 1.2)
 check('back to live: the window shrinks to its first size and the scale is unchanged', (root.winfo_width(), root.winfo_height()) == (w0, h0) and app.k == k0, (root.winfo_width(), root.winfo_height(), w0, h0))
 
+# ---- real mouse events (the hidden window of functional.py does not get them): Tk counts single, double, triple clicks, the scope must not follow it
+sx_, sy_ = (app.P['osc'][0] + app.P['osc'][2]) // 2, (app.P['osc'][1] + app.P['osc'][3]) // 2
+app.click_last = None
+states = []
+for k_ in range(3):
+    app.c.event_generate('<Button-1>', x=sx_, y=sy_)
+    root.update()
+    states.append(app.zoom)
+check('real mouse events: click, click, click (Tk calls the third a triple click) enlarges a scope and leaves it big', states == [None, 'osc', 'osc'], states)
+app.c.event_generate('<Button-1>', x=sx_, y=sy_)
+root.update()
+check('real mouse events: the fourth click is the second of a new double click and puts the scope back', app.zoom is None, app.zoom)
+app.click_last = None
+pump(root, 0.5)
+
 # ---- the graphs are drawn on their own threads and the window thread stays light
 import threading
 import time

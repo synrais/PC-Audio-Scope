@@ -816,6 +816,14 @@ WINDOWS = sys.platform == 'win32'
 MACOS = sys.platform == 'darwin'
 FLAT_BUTTONS = MACOS  # macOS draws tk.Button in the system colours, so buttons are drawn by FlatButton there
 FROZEN = bool(getattr(sys, 'frozen', False))  # running as a packaged program
+
+
+def double_click_time():
+    """how quickly (seconds) the second click of a double click has to follow the first: the system's setting on Windows, else half a second"""
+    try:
+        return max(0.2, min(2.0, ctypes.windll.user32.GetDoubleClickTime() / 1000.0))
+    except Exception:
+        return 0.5
 HERE = os.path.dirname(sys.executable) if FROZEN else os.path.dirname(os.path.abspath(__file__))
 if FROZEN and MACOS:
     REC_DIR = os.path.expanduser('~/Documents/PC Audio Scope/recordings')  # not inside the .app bundle
@@ -1123,7 +1131,7 @@ class BeamWorker:
 
 
 class Theme:
-    """the colours of the window: a background, one colour for each channel and a tint for the text; the rest is blended from those"""
+    """the colours of the window: a background, one colour for each channel (the lighter one is the left channel, the darker one the right) and a tint for the text; the rest is blended from those"""
     def __init__(self, name, bg, left, right, lname, rname, tint='#b8c4cc', accent='#4a90d9', vec=None, a=None, b=None, mark=None, on=None, spec=None, glow=True, good=None, live=None, peak=None):
         self.name, self.bg, self.left, self.right, self.lname, self.rname = name, bg, left, right, lname, rname
         self.txt = tint
@@ -1156,14 +1164,14 @@ class Theme:
 
 
 THEMES = [
-    Theme('Classic', '#101418', '#ff5a4d', '#ffd23f', 'red', 'yellow', vec='#57e0a8', a='#ff8a7d', b='#7fd0ff', mark=('#ffb347', '#7fd0ff'), on='#2a6a8f', glow=False, good='#57e0a8', live='#7bd88f', peak='#ff4040'),
-    Theme('Green phosphor', '#030b06', '#2bff70', '#c4ffd6', 'green', 'pale green', tint='#8fe8ad', accent='#27c45f', spec='#2bff70'),
-    Theme('Amber phosphor', '#0c0702', '#ffa31a', '#ffe6a8', 'amber', 'pale amber', tint='#f0c070', accent='#d98a14', spec='#ffa31a'),
-    Theme('Blue phosphor', '#030812', '#3aa8ff', '#c4e6ff', 'blue', 'ice', tint='#8fc4f0', accent='#2f86e0', spec='#3aa8ff'),
-    Theme('Red phosphor', '#0d0405', '#ff3b30', '#ffc2bd', 'red', 'pink', tint='#f09890', accent='#d6332b', spec='#ff3b30'),
-    Theme('Orange + blue', '#07090d', '#ff8a1f', '#2fb5ff', 'orange', 'blue', spec='#ff8a1f'),
+    Theme('Classic', '#101418', '#ffd23f', '#ff5a4d', 'yellow', 'red', vec='#57e0a8', a='#ff8a7d', b='#7fd0ff', mark=('#ffb347', '#7fd0ff'), on='#2a6a8f', glow=False, good='#57e0a8', live='#7bd88f', peak='#ff4040'),
+    Theme('Green phosphor', '#030b06', '#c4ffd6', '#2bff70', 'pale green', 'green', tint='#8fe8ad', accent='#27c45f', spec='#2bff70', vec='#2bff70', peak=mix('#2bff70', '#ffffff', 0.45), a='#2bff70', b='#c4ffd6'),
+    Theme('Amber phosphor', '#0c0702', '#ffe6a8', '#ffa31a', 'pale amber', 'amber', tint='#f0c070', accent='#d98a14', spec='#ffa31a', vec='#ffa31a', peak=mix('#ffa31a', '#ffffff', 0.45), a='#ffa31a', b='#ffe6a8'),
+    Theme('Blue phosphor', '#030812', '#c4e6ff', '#3aa8ff', 'ice', 'blue', tint='#8fc4f0', accent='#2f86e0', spec='#3aa8ff', vec='#3aa8ff', peak=mix('#3aa8ff', '#ffffff', 0.45), a='#3aa8ff', b='#c4e6ff'),
+    Theme('Red phosphor', '#0d0405', '#ffc2bd', '#ff3b30', 'pink', 'red', tint='#f09890', accent='#d6332b', spec='#ff3b30', vec='#ff3b30', peak=mix('#ff3b30', '#ffffff', 0.45), a='#ff3b30', b='#ffc2bd'),
+    Theme('Orange + blue', '#07090d', '#2fb5ff', '#ff8a1f', 'blue', 'orange', spec='#ff8a1f', vec='#ff8a1f', peak=mix('#ff8a1f', '#ffffff', 0.45), a='#ff8a1f', b='#2fb5ff'),
     Theme('Green + magenta', '#06080b', '#39ff6a', '#ff3df0', 'green', 'magenta', spec='#39ff6a'),
-    Theme('Red + cyan', '#08090c', '#ff4a3d', '#2ff0e8', 'red', 'cyan', spec='#ff4a3d'),
+    Theme('Red + cyan', '#08090c', '#2ff0e8', '#ff4a3d', 'cyan', 'red', spec='#ff4a3d', vec='#ff4a3d', peak=mix('#ff4a3d', '#ffffff', 0.45), a='#ff4a3d', b='#2ff0e8'),
 ]
 
 
@@ -1883,7 +1891,9 @@ class App:
         self.view_user = False
         self.cmp_busy = False
         self.findings_on = False  # the findings list replaces the level history
-        self.zoom = None  # the scope panel that fills the whole scope area (click a scope), or None
+        self.zoom = None  # the scope panel that fills the whole scope area (double-click a scope), or None
+        self.click_last = None  # (time, x, y) of a first click that waits for its second
+        self.dbl_time = double_click_time()
         self.dc_now = [0.0, 0.0]
         self.last_dir = s.get('last_dir') or REC_DIR
         sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
@@ -1992,7 +2002,7 @@ class App:
         self.CW, self.CH, self.TH = S(self.BASE_W), S(self.BASE_H), S(self.BASE_TH)
         self.c = tk.Canvas(self.root, width=self.CW, height=self.CH, bg=self.BG, highlightthickness=0)
         self.c.pack()
-        self.c.bind('<Double-Button-1>', self.scope_click)  # a single click does nothing: it takes two to enlarge a scope or to go back
+        self.c.bind('<Button-1>', self.scope_press)  # a single click does nothing: it takes a double click (counted here, see scope_press) to enlarge a scope or to go back
         self.c.bind('<Motion>', self.scope_motion)
         self.build_scope()
         self.build_controls()
@@ -2122,6 +2132,17 @@ class App:
             if x0 <= x <= x1 and y0 <= y <= y1:
                 return n
         return None
+
+    def scope_press(self, e):
+        """a double click enlarges a scope or puts it back.  It is counted here and not by Tk, because Tk goes on counting (a third quick click is still a <Double-Button-1>, and so is the fourth),
+        so a quick click after the double click would undo it.  The second click of a double click is used up: the next click starts a new one"""
+        now = time.time()
+        last = self.click_last
+        if last is not None and now - last[0] <= self.dbl_time and abs(e.x - last[1]) <= self.S(6) and abs(e.y - last[2]) <= self.S(6):
+            self.click_last = None
+            self.scope_click(e)
+        else:
+            self.click_last = (now, e.x, e.y)
 
     def scope_click(self, e):
         if self.zoom:
