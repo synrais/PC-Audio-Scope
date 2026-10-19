@@ -209,4 +209,37 @@ whole_ = np.asarray(pl_b.image()).astype(int)
 ar_ = pl_b.active_rows()
 rows_ = np.asarray(pl_b.image_rows(ar_[0], ar_[1])).astype(int)
 check('line strength: the rows worked out alone are the same rows of the whole picture, and no row outside the active ones has any light', int(np.abs(rows_ - whole_[ar_[0]:ar_[1]]).max()) <= 2 and bool((np.concatenate([whole_[:ar_[0]], whole_[ar_[1]:]]) == np.array([7, 9, 13])).all()), ar_)
+# ---- wide burn: a third glow, very broad and faint, made in floating point
+lut_w = m.beam_palette('#07090d', '#ff8a1f')
+
+
+def wide_pic(wide, glow=0.4):
+    sc_ = m.BeamScreen(300, 200, 0.05, 3.2)
+    sc_.buf[100, 60:240] = 3.0  # a bright line across the middle
+    sc_.wide = wide
+    return np.asarray(sc_.render(lut_w, glow)).astype(int).sum(axis=2)
+
+
+w0_, w4_, w8_ = wide_pic(0.0), wide_pic(8.0), wide_pic(16.0)
+check('wide burn: with it on, light reaches far from a bright line (30 px away is dark without it), more with more gain, and it never darkens anything',
+      w0_[70, 150] <= 29 + 1 and w4_[70, 150] > w0_[70, 150] + 3 and w8_[70, 150] > w4_[70, 150] + 3 and bool((w4_ >= w0_).all()) and bool((w8_ >= w4_).all()), (w0_[70, 150], w4_[70, 150], w8_[70, 150]))
+col_ = wide_pic(16.0, glow=0.0)[10:68, 150].astype(int)  # (without the narrow glow: just the wide one, from far away up to 32 px from the line)
+check('wide burn: the glow fades smoothly with the distance from the line (a step of at most a level in each colour, no blocks), brighter toward the line',
+      bool((np.abs(np.diff(col_)) <= 4).all()) and bool((np.diff(col_) >= -1).all()) and col_[-1] > col_[0] + 3, (col_[::10].tolist(),))
+check('wide burn does not depend on the narrow glow: with the narrow glow at 0 it still shines', wide_pic(8.0, glow=0.0)[70, 150] > wide_pic(0.0, glow=0.0)[70, 150] + 3, (wide_pic(8.0, glow=0.0)[70, 150], wide_pic(0.0, glow=0.0)[70, 150]))
+imp_s = np.zeros((20, 20), np.float32)
+imp_s[10, 10] = 100.0
+bs_ = m._blur_small(imp_s, 2.0)
+check('_blur_small: a Gaussian that keeps the light (to a percent, nothing is lost near the middle), is symmetric and falls off from the middle', abs(float(bs_.sum()) - 100.0) < 1.0 and np.allclose(bs_, bs_.T, atol=1e-5) and bs_[10, 10] > bs_[10, 12] > bs_[10, 15], (bs_.sum(), bs_[10, 10]))
+pw_b = m.BeamPlot(np.full((260, 400, 3), (7, 9, 13), np.uint8), '#07090d', ('#2fb5ff', '#ff8a1f'), 0.04, 3.2, 0.25, 64, 0.4, 'add')
+r0_ = pw_b._reach()
+for sc_ in pw_b.screens:
+    sc_.wide = 4.0
+check('wide burn: the glow of a lit row reaches three times as far, so the rows worked out alone include it', pw_b._reach() > 2.5 * r0_, (r0_, pw_b._reach()))
+pw_b.add(0, np.linspace(10, 390, 90), 120 + 25 * np.sin(np.linspace(0, 8, 90)), 0.033)
+wh_ = np.asarray(pw_b.image()).astype(int)
+arw_ = pw_b.active_rows()
+rw_ = np.asarray(pw_b.image_rows(arw_[0], arw_[1])).astype(int)
+check('wide burn: the rows worked out alone are the same rows of the whole picture, and the rows outside them are the background', int(np.abs(rw_ - wh_[arw_[0]:arw_[1]]).max()) <= 3 and int(np.abs(np.concatenate([wh_[:arw_[0]], wh_[arw_[1]:]]) - np.array([7, 9, 13])).max()) <= 1, arw_)
+
 T.finish()

@@ -116,13 +116,13 @@ def release_at(x_, y_):
     root.update()
 
 
-e_, y0_, y1_ = rowof('CRT burn')
+e_, y0_, y1_ = rowof('Narrow burn')
 lx0_, lx1_, rx0_, rx1_ = e_['boxes']
 ym_ = (y0_ + y1_) // 2
 start_ = e_['n']
 click_at((rx0_ + rx1_) // 2, ym_)
 release_at((rx0_ + rx1_) // 2, ym_)
-check('a click on the right arrow steps CRT burn up by 0.1 and the menu stays open', e_['n'] == start_ + 1 and app.panel_burn_level('osc') == (start_ + 1) / 10.0 and app.popup is pm_ and pm_.top is not None
+check('a click on the right arrow steps Narrow burn up by 0.1 and the menu stays open', e_['n'] == start_ + 1 and app.panel_burn_level('osc') == (start_ + 1) / 10.0 and app.popup is pm_ and pm_.top is not None
       and app.beam_plot('osc').plot.glow == (start_ + 1) / 10.0, (e_['n'], start_))
 click_at((lx0_ + lx1_) // 2, ym_)
 release_at((lx0_ + lx1_) // 2, ym_)
@@ -143,7 +143,7 @@ check('and it stops when the arrow is let go', e_['n'] == nrun_, (e_['n'], nrun_
 pm_.hover = None
 for key_ in ('Down', 'Down', 'Down'):
     pm_.on_key(types.SimpleNamespace(keysym=key_))
-check('Down moves the highlight along the rows (the heading is skipped)', pm_.hover is not None and not pm_.hover.get('heading') and pm_.hover['label'] == 'CRT burn', pm_.hover and pm_.hover['label'])
+check('Down moves the highlight along the rows (the heading is skipped)', pm_.hover is not None and not pm_.hover.get('heading') and pm_.hover['label'] == 'Narrow burn', pm_.hover and pm_.hover['label'])
 n1_ = e_['n']
 pm_.on_key(types.SimpleNamespace(keysym='Right'))
 pm_.on_key(types.SimpleNamespace(keysym='Right'))
@@ -155,6 +155,10 @@ pm_.on_key(types.SimpleNamespace(keysym='Home'))
 check('Home takes it to Off: clean lines, and the Line strength row goes from the menu', e_['n'] == 0 and not app.panel_crt('osc') and not pm_.visible(pm_.stepper('Line strength')) and all(r_[0].get('label') != 'Line strength' for r_ in pm_.rows), e_['n'])
 pm_.on_key(types.SimpleNamespace(keysym='Right'))
 check('and one step on it is the beam again at 0.1, with the Line strength row back', app.panel_crt('osc') and app.panel_burn_level('osc') == 0.1 and any(r_[0].get('label') == 'Line strength' for r_ in pm_.rows), app.panel_opts.get('osc'))
+pm_.on_key(types.SimpleNamespace(keysym='Down'))
+ewide_ = pm_.hover
+pm_.on_key(types.SimpleNamespace(keysym='Right'))
+check('Wide burn steps with the keys too: 0.1 is a wide glow of gain 0.4', ewide_['label'] == 'Wide burn' and app.panel_wide_level('osc') == 0.1 and abs(app.beam_plot('osc').plot.screens[0].wide - 0.4) < 1e-9, (ewide_['label'], app.panel_wide_level('osc')))
 pm_.on_key(types.SimpleNamespace(keysym='Down'))
 es_ = pm_.hover
 pm_.on_key(types.SimpleNamespace(keysym='Right'))

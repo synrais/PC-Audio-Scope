@@ -821,15 +821,16 @@ FROZEN = bool(getattr(sys, 'frozen', False))  # running as a packaged program
 PANELS = ('osc', 'vec', 'met', 'spec', 'hist')
 PANEL_TITLES = {'osc': 'Oscilloscope', 'vec': 'Vectorscope', 'met': 'Levels', 'spec': 'Spectrum', 'hist': 'Level history'}
 DEFAULT_THEME = 'Orange + blue'  # the theme a first run starts with
-# what a window starts with before anything is chosen in its menu (anything not listed is on): the enlarged windows are clean, the spectrum has no grid but keeps its range names when enlarged
+# what a window starts with before anything is chosen in its menu (anything not listed is on): the enlarged windows have no grid, and no info except the spectrum and the level history; the spectrum has no grid
+# in the normal layout either
 PANEL_DEFAULTS = {'osc': {'fs_grid': False, 'fs_info': False}, 'vec': {'fs_grid': False, 'fs_info': False}, 'met': {'fs_grid': False, 'fs_info': False},
-                  'hist': {'fs_grid': False, 'fs_info': False}, 'spec': {'grid': False, 'fs_grid': False, 'fs_info': True}}
+                  'hist': {'fs_grid': False}, 'spec': {'grid': False, 'fs_grid': False}}
 HEX_COLOUR = re.compile(r'^#[0-9a-fA-F]{6}$')
 
 
 def clean_panel_opts(d):
     """the choices made for each window (right-click it), as read from the settings file: anything unknown or invalid is left out.  Per window: 'grid', 'info' (its numbers and text) and the same two for when it fills the window, 'fs_grid' and 'fs_info', 'crt'
-    'burn' (CRT burn: the glow of the phosphor beam, 0 = clean lines, to 3), 'strength' (Line strength, 1 to 10: how solid the beam's lines are), 'left' and 'right' (a colour each; the vectorscope has just 'color').  'glow' was the first
+    'burn' (Narrow burn: the glow of the phosphor beam, 0 = clean lines, to 3), 'wide' (Wide burn: a broad, faint glow, 0 to 3), 'strength' (Line strength, 1 to 10: how solid the beam's lines are), 'left' and 'right' (a colour each; the vectorscope has just 'color').  'glow' was the first
     name of 'overburn', 'classic' the one before it (the other way round)"""
     out = {}
     if not isinstance(d, dict):
@@ -848,12 +849,15 @@ def clean_panel_opts(d):
         burn = o.get('burn')
         if isinstance(burn, (int, float)) and not isinstance(burn, bool) and 0 <= burn <= BURN_MAX:
             keep['burn'] = round(float(burn) * 10) / 10.0
-        elif o.get('crt') is False:  # (CRT burn was on or off, and Overburn on or off; now it is one level.  'glow' and 'classic' were the first names of Overburn)
+        elif o.get('crt') is False:  # (CRT burn was on or off, and Overburn on or off; now it is one level, Narrow burn.  'glow' and 'classic' were the first names of Overburn)
             keep['burn'] = 0.0
         else:
             ob = o['overburn'] if isinstance(o.get('overburn'), bool) else o['glow'] if isinstance(o.get('glow'), bool) else (not o['classic']) if isinstance(o.get('classic'), bool) else None
             if ob is not None:
                 keep['burn'] = BURN_HIGH if ob else BURN_LOW
+        wide = o.get('wide')
+        if isinstance(wide, (int, float)) and not isinstance(wide, bool) and 0 <= wide <= BURN_MAX:
+            keep['wide'] = round(float(wide) * 10) / 10.0
         for k in (('color',) if name == 'vec' else ('left', 'right')):
             if isinstance(o.get(k), str) and HEX_COLOUR.match(o[k]):
                 keep[k] = o[k].lower()
@@ -1020,6 +1024,7 @@ class BeamScreen:
         self.exposure = self.EXPOSURE if exposure is None else exposure
         self.buf = np.zeros((self.h, self.w), np.float32)
         self.lift = 1.0  # below 1: the line itself is drawn bolder (see _lift_table); its glow stays as it is
+        self.wide = 0.0  # the gain of the wide glow (see wide_rows); 0: none
 
     def clear(self):
         self.buf[:] = 0.0
@@ -1054,15 +1059,45 @@ class BeamScreen:
         g2 = small.resize((small.width * 4, small.height * 4), Image.Resampling.BILINEAR).crop((0, 0, im.width, im.height)).point(_gain_table(0.6 * glow))  # the wide glow is soft, so a quarter of the pixels do
         core = im if self.lift >= 0.999 else im.point(_lift_table(self.lift))  # (the glow is made from the brightness as it was)
         out = ImageChops.add(ImageChops.add(core, g1), g2)
+        if self.wide > 0:
+            out = ImageChops.add(out, self.wide_rows(r0, r1, k))
         out.putpalette(lut.reshape(-1).tolist())
         return out.convert('RGB')
+
+    def wide_rows(self, r0, r1, k):
+        """rows r0 to r1 of the wide glow, a third glow that is very broad and faint (a sigma of about 20 k pixels, as glass scatters light): the brightness of the whole screen averaged in blocks of
+        16 x 16, blurred, and enlarged again.  It is made in floating point, so that the faint gradient stays smooth"""
+        r = 16
+        x = self.buf * self.exposure
+        b = x / (1.0 + x)
+        h16, w16 = -(-self.h // r), -(-self.w // r)
+        p = np.zeros((h16 * r, w16 * r), np.float32)
+        p[:self.h, :self.w] = b
+        low = _blur_small(p.reshape(h16, r, w16, r).mean(axis=(1, 3)), max(0.6, WIDE_SIGMA * k / r))
+        big = Image.fromarray(np.ascontiguousarray(low, np.float32), 'F').resize((self.w, r1 - r0), Image.Resampling.BILINEAR, box=(0, r0 / float(r), self.w / float(r), r1 / float(r)))
+        return Image.fromarray(np.clip(np.asarray(big) * (255.0 * self.wide), 0, 255).astype(np.uint8), 'L')
 
 
 _GAIN_TABLES = {}
 _LIFT_TABLES = {}
+WIDE_SIGMA = 20.0  # the width of the wide glow, in units of the screen's size relative to the first vectorscope (276 pixels); 78 pixels at 1080 high
+WIDE_GAIN = 4.0  # the gain of the wide glow for each 1.0 of Wide burn (a faint haze at 0.5, a clear one at 1.0)
+
+
+def _blur_small(a, sigma):
+    """a Gaussian blur of a small float picture (zero outside), done with plain array sums: the picture is a sixteenth of the screen's size"""
+    r = int(math.ceil(3 * sigma))
+    x = np.arange(-r, r + 1, dtype=np.float32)
+    kern = np.exp(-x * x / (2.0 * sigma * sigma))
+    kern /= kern.sum()
+    h, w = a.shape
+    p = np.pad(a, ((r, r), (0, 0)))
+    v = sum(kern[i] * p[i:i + h] for i in range(2 * r + 1))
+    p = np.pad(v, ((0, 0), (r, r)))
+    return sum(kern[i] * p[:, i:i + w] for i in range(2 * r + 1))
 STRENGTH_MIN, STRENGTH_MAX, STRENGTH_DEFAULT = 1, 10, 6  # 'Line strength': 1 (the beam's brightness as it is) to 10; each step lowers the exponent of _lift_table by 0.05 (6 is what Light was: 0.75, 9 what Strong was: 0.6)
 STRENGTH_LEGACY = {'Default': 1, 'Off': 1, 'Light': 6, 'Strong': 9}  # (the strength was a name before it was a number)
-BURN_MAX, BURN_LOW, BURN_HIGH = 3.0, 0.4, 1.0  # 'CRT burn': the glow of the beam, 0 (clean lines) to 3 in steps of 0.1; a window starts on the low level or the high one (the old On and Overburn)
+BURN_MAX, BURN_LOW, BURN_HIGH = 3.0, 0.4, 1.0  # 'Narrow burn': the glow of the beam, 0 (clean lines) to 3 in steps of 0.1 ('Wide burn', 0 to 3, is the broad faint one); a window starts on the low level or the high one (the old On and Overburn)
 
 
 def strength_text(n):
@@ -1155,9 +1190,9 @@ class BeamPlot:
         return self.image_rows(0, self.h)
 
     def _reach(self):
-        """how many rows (of the screens) the glow of a lit row reaches"""
+        """how many rows (of the screens) the glow of a lit row reaches (the wide glow reaches three times as far)"""
         rw, rh = self.screens[0].w, self.screens[0].h
-        return int(math.ceil(22 * min(rw, rh) / 276.0)) + 4
+        return int(math.ceil((66 if any(sc.wide > 0 for sc in self.screens) else 22) * min(rw, rh) / 276.0)) + 4
 
     def active_rows(self):
         """the rows (of the picture) that can have light, glow included: (first, last + 1), or (0, 0) when there is none"""
@@ -2778,8 +2813,25 @@ class App:
         key = 'fs_info' if self.zoom == name else 'info'
         return self.panel_opts.get(name, {}).get(key, PANEL_DEFAULTS.get(name, {}).get(key, True))
 
+    def panel_wide_level(self, name):
+        """Wide burn: the broad, faint glow of a window's beam, 0 (none, the start) to 3 in steps of 0.1"""
+        return self.panel_opts.get(name, {}).get('wide', 0.0)
+
+    def wide_gain(self, name):
+        return WIDE_GAIN * self.panel_wide_level(name)
+
+    def set_panel_wide_level(self, name, level, save=True):
+        level = round(min(BURN_MAX, max(0.0, float(level))) * 10) / 10.0
+        self.panel_opts.setdefault(name, {})['wide'] = level
+        if save:
+            self.save_settings()
+        wk = self.plots.get(name)
+        if wk is not None and not wk.plot.clean:
+            for sc in (wk.plot.screens if hasattr(wk.plot, 'screens') else [wk.plot.screen]):
+                sc.wide = self.wide_gain(name)
+
     def panel_burn_level(self, name):
-        """CRT burn: the glow of a window's phosphor beam, 0 (clean lines) to 3 in steps of 0.1: chosen for the window, else the start: 1.0 for the vectorscope and the levels (the Classic theme: the
+        """Narrow burn: the glow of a window's phosphor beam, 0 (clean lines) to 3 in steps of 0.1: chosen for the window, else the start: 1.0 for the vectorscope and the levels (the Classic theme: the
         vectorscope only), 0.4 for the rest (a crisp, light glow)"""
         o = self.panel_opts.get(name, {})
         if 'burn' in o:
@@ -2787,7 +2839,7 @@ class App:
         return BURN_HIGH if name in (('vec', 'met') if self.th.glow else ('vec',)) else BURN_LOW
 
     def panel_crt(self, name):
-        """the CRT look (a phosphor beam with persistence, glow and white-hot lines), unless CRT burn is 0: clean lines"""
+        """the CRT look (a phosphor beam with persistence, glow and white-hot lines), unless Narrow burn is 0: clean lines"""
         return self.panel_burn_level(name) > 0
 
     def panel_colors(self, name):
@@ -2879,7 +2931,7 @@ class App:
         return tick, blank
 
     def panel_menu_build(self, name):
-        """the menu of a window: its grid, its info (numbers and text), CRT burn and Line strength (steppers: a number with an arrow either side) and its colours (left and right; the vectorscope has one)"""
+        """the menu of a window: its grid, its info (numbers and text), Narrow burn, Wide burn and Line strength (steppers: a number with an arrow either side) and its colours (left and right; the vectorscope has one)"""
         th = self.th
         px = max(10, int(round(tkfont.Font(root=self.root, font=self.F(9, 'Segoe UI')).metrics('linespace') * 0.8)))
         tick, blank = self.menu_marks(px)  # a tick or an empty space of the same size to the left of the words: the words line up
@@ -2895,7 +2947,8 @@ class App:
         menu._on = (grid_on, info_on, crt_on, burn)  # what is on
         if spectrogram:
             return menu
-        menu.add_stepper('CRT burn', int(round(burn * 10)), int(round(BURN_MAX * 10)), burn_text, lambda n, save=True: self.set_panel_burn_level(name, n / 10.0, save))
+        menu.add_stepper('Narrow burn', int(round(burn * 10)), int(round(BURN_MAX * 10)), burn_text, lambda n, save=True: self.set_panel_burn_level(name, n / 10.0, save))
+        menu.add_stepper('Wide burn', int(round(self.panel_wide_level(name) * 10)), int(round(BURN_MAX * 10)), burn_text, lambda n, save=True: self.set_panel_wide_level(name, n / 10.0, save), visible=lambda: self.panel_crt(name))
         if name != 'met':  # (the weak end of the beam's brightness raised: more solid lines; only with the beam)
             menu.add_stepper('Line strength', self.panel_strength(name), STRENGTH_MAX, strength_text, lambda n, save=True: self.set_panel_strength(name, n, save), visible=lambda: self.panel_crt(name), n_min=STRENGTH_MIN)
         menu.add_separator()
@@ -4388,9 +4441,11 @@ class App:
             pl = BeamPlot(a, th.bg, colors, 0.05, 1.3, 1.0, 64, glow, flat=not crt)
         else:  # a level history has to keep its dips visible, so a fast stroke is not dimmed (power 0)
             pl = mk(plot_base(w, h, th.bg, th.grid, th.peak, rows, frame=self.panel_border(name)), 0.05, 0.32, 0.0, 200, 'white')  # each channel keeps its colour; where they overlap the line turns white, without the thick burnt band that adding their light made
-        if crt and name != 'met':
+        if crt:
             for sc in pl.screens:
-                sc.lift = self.strength_lift(name)
+                if name != 'met':
+                    sc.lift = self.strength_lift(name)
+                sc.wide = self.wide_gain(name)
         wk = self.plots[name] = BeamWorker(pl, self.THREADED, banded=True)
         return wk
 
@@ -4476,6 +4531,8 @@ class App:
             self.beam, self.vec_last = wk.plot.screen, None
         elif crt and wk.plot.glow != glow:
             wk.plot.glow = glow  # (a step of the glow does not start the picture again)
+        if crt:
+            wk.plot.screen.wide = self.wide_gain('vec')
         pos = self.player.pos if clip is not None else self.cap.pos
         new = None if self.vec_last is None else pos - self.vec_last
         clear = False
