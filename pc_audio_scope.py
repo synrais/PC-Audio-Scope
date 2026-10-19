@@ -824,9 +824,9 @@ DEFAULT_THEME = 'Orange + blue'  # the theme a first run starts with
 # what a window starts with before anything is chosen in its menu (anything not listed is on): the enlarged windows have no grid, and no info except the spectrum and the level history; the spectrum has no grid
 # in the normal layout either
 # 'burn' (Narrow burn) and 'wide' (Wide burn) too, for a theme with glow (the Classic theme keeps its crisp look: only the vectorscope burns, nothing wide)
-PANEL_DEFAULTS = {'osc': {'fs_grid': False, 'fs_info': False, 'burn': 0.6, 'wide': 0.6}, 'vec': {'fs_grid': False, 'fs_info': False, 'burn': 0.6, 'wide': 0.3},
-                  'met': {'fs_grid': False, 'fs_info': False, 'burn': 1.0, 'wide': 0.3}, 'hist': {'fs_grid': False, 'burn': 0.4, 'wide': 0.2},
-                  'spec': {'grid': False, 'fs_grid': False, 'burn': 0.4, 'wide': 0.3}}
+PANEL_DEFAULTS = {'osc': {'fs_grid': False, 'fs_info': False, 'burn': 0.3, 'wide': 0.5}, 'vec': {'fs_grid': False, 'fs_info': False, 'burn': 0.3, 'wide': 0.3},
+                  'met': {'fs_grid': False, 'fs_info': False, 'burn': 1.0, 'wide': 0.3}, 'hist': {'fs_grid': False, 'burn': 0.3, 'wide': 0.2},
+                  'spec': {'grid': False, 'fs_grid': False, 'burn': 0.3, 'wide': 0.3}}
 HEX_COLOUR = re.compile(r'^#[0-9a-fA-F]{6}$')
 
 

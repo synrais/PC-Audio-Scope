@@ -602,8 +602,8 @@ try:
           full_ == {'osc': (False, False), 'vec': (False, False), 'met': (False, False), 'spec': (False, True), 'hist': (False, True)}, full_)
     burn_ = {n_: m.App.panel_burn_level(stub_, n_) for n_ in m.PANELS}
     wide_ = {n_: m.App.panel_wide_level(stub_, n_) for n_ in m.PANELS}
-    check('first run: Narrow burn 0.6 for the oscilloscope and vectorscope, 0.4 for the spectrum and history, 1.0 for the levels; Wide burn 0.6, 0.3, 0.3, 0.2 and 0.3 (oscilloscope, vectorscope, spectrum, history, levels); every beam window starts on Line strength 6',
-          burn_ == {'osc': 0.6, 'vec': 0.6, 'met': 1.0, 'spec': 0.4, 'hist': 0.4} and wide_ == {'osc': 0.6, 'vec': 0.3, 'met': 0.3, 'spec': 0.3, 'hist': 0.2} and all(m.App.panel_crt(stub_, n_) for n_ in m.PANELS)
+    check('first run: Narrow burn 0.3 for every window but the levels (1.0); Wide burn 0.5, 0.3, 0.3, 0.2 and 0.3 (oscilloscope, vectorscope, spectrum, history, levels); every beam window starts on Line strength 6',
+          burn_ == {'osc': 0.3, 'vec': 0.3, 'met': 1.0, 'spec': 0.3, 'hist': 0.3} and wide_ == {'osc': 0.5, 'vec': 0.3, 'met': 0.3, 'spec': 0.3, 'hist': 0.2} and all(m.App.panel_crt(stub_, n_) for n_ in m.PANELS)
           and all(m.App.panel_strength(stub_, n_) == 6 for n_ in ('osc', 'vec', 'spec', 'hist')) and m.App.panel_strength(stub_, 'met') == 1, (burn_, wide_))
     classic_ = [t_ for t_ in m.THEMES if t_.name == 'Classic'][0]
     stub_.th = classic_
