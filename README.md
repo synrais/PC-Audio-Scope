@@ -12,7 +12,7 @@ findings, and talk about the same moment.
 
 It started as a way to check that two builds of the same game sound the same.
 
-![PC Audio Scope playing music: oscilloscope, vectorscope, levels, spectrum and level history](docs/live.png)
+![PC Audio Scope playing music: oscilloscope, vectorscope, levels, spectrum and level history](docs/live.gif)
 
 ## Download
 
@@ -189,7 +189,7 @@ On a Mac you open the app the first time with right-click, Open (it is unsigned)
 | `tests/` | `python tests/run.py` runs everything in about a minute, in a hidden window with a synthetic input; nothing is played |
 | `packaging/` | the PyInstaller recipe and the icon |
 | `releases/` | the ready-made programs |
-| `docs/` | the pictures above: `live.png` is a real capture of the program playing music, the others are made by `python tests/screenshots.py` from synthetic data (the analysis picture comes from a demo piece with a fault in each channel) |
+| `docs/` | the pictures above: `live.gif` is a real capture of the program playing music, the others are made by `python tests/screenshots.py` from synthetic data (the analysis picture comes from a demo piece with a fault in each channel) |
 | `recordings/` | your clips (created on first use, not part of the repository) |
 
 ## Limits
