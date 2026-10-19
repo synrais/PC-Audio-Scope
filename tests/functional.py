@@ -1,6 +1,8 @@
 """drives the whole app in a hidden window with a synthetic input: live view, recording, review, selection, loop, export, comparing, input menu, scaling, settings"""
 import json
 import os
+import re
+import time
 import tkinter as tk
 
 import numpy as np
@@ -226,6 +228,118 @@ check('and double-clicking again brings the button rows back, in their places', 
 check('the levels panel can be double-clicked like the others (it is a window the mouse finds)', app.scope_hit((normal_P['met'][0] + normal_P['met'][2]) // 2, (normal_P['met'][1] + normal_P['met'][3]) // 2) == 'met' and app.zoom is None)
 no_error('after zooming')
 
+# ---- speed: the spectrum worked out all at once is the spectrum worked out band by band; the pictures on screen are the pictures made; the governor
+rng_s = np.random.default_rng(11)
+L_s, R_s = rng_s.standard_normal(4096) * 0.05, np.sin(np.arange(4096) * 0.31) * 0.2
+app.panel_opts.clear()
+app.refresh_panels()
+app.draw_spectrum(L_s, R_s, 0.0)
+x0_, y0_, x1_, y1_ = app.P['spec']
+win_ = np.hanning(4096)
+fr_ = np.fft.rfftfreq(4096, 1.0 / m.SR)
+edges_ = np.logspace(np.log10(30), np.log10(20000), 140)
+ref_pts = []
+for data_ in (L_s, R_s):  # the way it was done: a band at a time
+    mag_ = np.abs(np.fft.rfft(data_ * win_)) * 2.0 / win_.sum()
+    px_, py_ = [], []
+    for a_, b_ in zip(edges_[:-1], edges_[1:]):
+        sel_ = (fr_ >= a_) & (fr_ < b_)
+        v_ = float(mag_[sel_].max()) if sel_.any() else float(mag_[np.searchsorted(fr_, a_)])
+        px_.append(app.fx(np.sqrt(a_ * b_)))
+        py_.append(min(y1_, max(y0_, y0_ + (-m.db(v_)) / m.DB_RANGE * (y1_ - y0_))))
+    ref_pts.append((np.array(px_), np.array(py_)))
+check('the spectrum worked out all at once is, point for point, the spectrum worked out a band at a time', all(np.allclose(app.spec_pts[i_][0], ref_pts[i_][0]) and np.allclose(app.spec_pts[i_][1], ref_pts[i_][1], atol=1e-9) for i_ in (0, 1)) and len(app.spec_pts[0][0]) == 139,
+      [float(np.abs(app.spec_pts[i_][1] - ref_pts[i_][1]).max()) for i_ in (0, 1)])
+# the picture on screen is the picture made, after many frames with bands
+app.work_ms = 0.0
+for k_ in range(40):
+    app.cap.pos  # (the live synthetic sound goes on by itself)
+    app.draw()
+    time.sleep(0.01)
+mism_ = []
+for n_ in ('osc', 'spec', 'met'):
+    wk_ = app.plots[n_]
+    made_ = np.asarray(wk_.plot.image())
+    ph_, bi_, bph_ = app.photos[n_], app.band_items.get(n_), app.band_photos.get(n_)
+    item_ = {'osc': app.osc_item, 'spec': app.spec_item, 'met': app.met_item}[n_]
+    ix_, iy_ = app.c.coords(item_)
+    by_ = int(round(app.c.coords(bi_)[1] - iy_)) if (bi_ is not None and app.c.itemcget(bi_, 'image')) else None
+    bh_ = bph_.height() if bph_ is not None else 0
+    probe_ = [(int(x_), int(y_)) for x_, y_ in zip(rng_s.integers(0, made_.shape[1], 300), rng_s.integers(0, made_.shape[0], 300))] + [(0, 0), (made_.shape[1] - 1, made_.shape[0] - 1)]
+    lit_y = np.flatnonzero((made_.astype(int) - np.asarray(wk_.plot.base).astype(int)).sum(axis=(1, 2)) > 0)
+    probe_ += [(int(rng_s.integers(0, made_.shape[1])), int(y_)) for y_ in rng_s.choice(lit_y, 120)] if len(lit_y) else []
+    wrong_ = 0
+    for x_, y_ in probe_:  # what is seen at that pixel: the little picture of the rows with light where there is one, the background elsewhere
+        if by_ is not None and by_ <= y_ < by_ + wk_.last_band[1] - wk_.last_band[0]:
+            got_ = tuple(int(v_) for v_ in app.root.tk.splitlist(app.root.tk.call(str(bph_), 'get', x_, y_ - by_)))
+        else:
+            got_ = tuple(int(v_) for v_ in app.root.tk.splitlist(app.root.tk.call(str(ph_), 'get', x_, y_)))
+        if max(abs(a_ - b_) for a_, b_ in zip(got_, tuple(int(v_) for v_ in made_[y_, x_]))) > 2:
+            wrong_ += 1
+    mism_.append((n_, wrong_, by_, wk_.last_band))
+check('the pictures in the window are the pictures that were made: the background and, on top, the rows with light: after many frames every pixel looked at is right (no old light left behind)', all(c_[1] == 0 for c_ in mism_), mism_)
+# the governor: busy while the window cannot keep up, and it lets go only with plenty of room
+app.work_ms, app.redraw_ms, app._busy = 5.0, 5.0, False
+app.frame = 1
+b0_ = app.busy()
+app.work_ms, app.redraw_ms = 18.0, 10.0
+app.frame = 1
+b1_ = app.busy()
+app.work_ms, app.redraw_ms = 12.0, 8.0
+app.frame = 1
+b2_ = app.busy()
+app.work_ms, app.redraw_ms = 8.0, 5.0
+app.frame = 1
+b3_ = app.busy()
+app.frame = 2
+b4_ = (app.work_ms, app.redraw_ms, app.busy())
+app.work_ms, app.redraw_ms, app._busy = 5.0, 3.0, False
+check('the governor: busy only while a frame and its drawing take most of the 33 ms, stays busy until there is plenty of room, and then sits out every other frame only', (b0_, b1_, b2_, b3_) == (False, True, True, False) and b4_[2] is False, (b0_, b1_, b2_, b3_, b4_))
+app.panel_opts.clear()
+app.refresh_panels()
+
+# ---- speed: the timeline's envelopes are one picture, so the playhead costs nothing; the spectrum's band dividers are only under the graph when its names are
+app.go_live()
+app.open_loaded(m.Clip(T.demo_audio(1).astype(np.float32), None, name='tl picture'))
+pump(root, 0.3)
+app.tl_key = None
+app.draw_timeline()
+tl_ = app.tl
+kinds_ = {}
+for i_ in tl_.find_all():
+    kinds_[tl_.type(i_)] = kinds_.get(tl_.type(i_), 0) + 1
+big_polys = [i_ for i_ in tl_.find_all() if tl_.type(i_) == 'polygon' and len(tl_.coords(i_)) > 12]
+check('timeline: the level envelopes and flags are one picture on the canvas (no big polygons)', kinds_.get('image') == 1 and not big_polys, (kinds_, len(big_polys)))
+lane0 = app.lanes()[0]
+ph_ = app.tl_photo
+cy_ = int((lane0[0] + lane0[1]) / 2)
+want_ = tuple(int(app.th.env_l[i_:i_ + 2], 16) for i_ in (1, 3, 5))
+row_ = [tuple(int(v_) for v_ in re.findall(r'\d+', str(app.root.tk.call(str(ph_), 'get', x_, cy_)))[:3]) for x_ in range(0, ph_.width(), 3)]
+check('timeline: the envelope is in the picture, in the colour of its channel', any(max(abs(a_ - b_) for a_, b_ in zip(r_, want_)) <= 2 for r_ in row_), want_)
+key_, n_items_ = app.tl_key, len(tl_.find_all())
+app.seek_t(1.0)
+app.draw_timeline()
+app.seek_t(2.0)
+app.draw_timeline()
+check('timeline: moving the playhead changes only the playhead', app.tl_key == key_ and len(tl_.find_all()) == n_items_ and len(tl_.find_withtag('head')) == 2, (app.tl_key == key_, len(tl_.find_all()), n_items_))
+app.go_live()
+pump(root, 0.3)
+
+def divider_lines():
+    xx0, yy0, xx1, yy1 = app.P['spec']
+    return [i_ for i_ in app.c.find_withtag('spec') if app.c.type(i_) == 'line' and app.c.coords(i_)[3] > yy1 + 3]
+
+app.panel_opts.clear()
+app.panel_opts['spec'] = {'info': True, 'grid': True}
+app.refresh_panels()
+with_names = len(divider_lines())
+app.panel_opts['spec'] = {'info': False, 'grid': True}
+app.refresh_panels()
+no_names = len(divider_lines())
+check('spectrum: with the names off, no band dividers stick out under the graph (they are there with the names on)', with_names >= 4 and no_names == 0, (with_names, no_names))
+app.panel_opts.clear()
+app.refresh_panels()
+
 # ---- right click on a window: its grid, the crisp light levels, its own colours
 check('the oscilloscope title is just its name (no list of the channel colours next to it)', [app.c.itemcget(i_, 'text') for i_ in app.c.find_all() if app.c.type(i_) == 'text' and app.c.itemcget(i_, 'text').startswith('OSCILLOSCOPE')] == ['OSCILLOSCOPE'])
 rgb_ = lambda c_: tuple(int(c_[i_:i_ + 2], 16) for i_ in (1, 3, 5))
@@ -239,16 +353,20 @@ def menu_labels(menu_):
     return [menu_.entrycget(i_, 'label') for i_ in range(menu_.index('end') + 1) if menu_.type(i_) in ('command', 'checkbutton')]
 
 
+def stepper_labels(menu_):
+    return [menu_.entrycget(i_, 'label') for i_ in range(menu_.index('end') + 1) if menu_.type(i_) == 'stepper']
+
+
 mn_ = app.panel_menu_build('osc')
 mv_ = app.panel_menu_build('vec')
-check('the menu of a window: its name, Grid, Info, CRT glow, Overburn, the left and the right colour (and nothing to go back from yet)',
-      menu_labels(mn_) == ['Oscilloscope', 'Grid', 'Info', 'CRT glow', 'Overburn', 'Left colour...', 'Right colour...'], menu_labels(mn_))
-check('the vectorscope has one colour, not two', menu_labels(mv_) == ['Vectorscope', 'Grid', 'Info', 'CRT glow', 'Overburn', 'Colour...'], menu_labels(mv_))
-check('the menu shows what is on now: the grid, the info and the CRT glow are on, overburn is that of the theme (ticked = the high light level)', mn_._on == (True, True, True, app.th.glow), (mn_._on, app.th.glow))
+check('the menu of a window: its name, Grid, Info, the stepper rows CRT burn and Line strength, the left and the right colour (and nothing to go back from yet)',
+      menu_labels(mn_) == ['Oscilloscope', 'Grid', 'Info', 'Left colour...', 'Right colour...'] and stepper_labels(mn_) == ['CRT burn', 'Line strength'], (menu_labels(mn_), stepper_labels(mn_)))
+check('the vectorscope has one colour, not two', menu_labels(mv_) == ['Vectorscope', 'Grid', 'Info', 'Colour...'], menu_labels(mv_))
+check('the menu shows what is on now: the grid and the info are on, and the oscilloscope has CRT burn 0.4 (the vectorscope 1.0)', mn_._on == (True, True, True, 0.4) and mv_._on == (True, True, True, 1.0), (mn_._on, mv_._on))
 check('a tick is a little picture left of the words (a blank one of the same size when off), not a Tk check mark that is drawn over them',
-      all(mn_.type(i_) == 'command' for i_ in (2, 3, 4, 5)) and mn_.entrycget(2, 'compound') == 'left' and mn_.entrycget(2, 'image') == str(mn_._marks[0]) and mn_.entrycget(3, 'image') == str(mn_._marks[0])
-      and mn_.entrycget(4, 'image') == str(mn_._marks[0]) and mn_.entrycget(5, 'image') == str(mn_._marks[0 if app.th.glow else 1]) and (mn_._marks[0].width(), mn_._marks[0].height()) == (mn_._marks[1].width(), mn_._marks[1].height()) and mn_._marks[0].width() >= 10,
-      (mn_.entrycget(2, 'image'), mn_.entrycget(4, 'image'), str(mn_._marks[0]), mn_._marks[0].width()))
+      all(mn_.type(i_) == 'command' for i_ in (2, 3)) and mn_.type(4) == 'stepper' and mn_.entrycget(2, 'compound') == 'left' and mn_.entrycget(2, 'image') == str(mn_._marks[0]) and mn_.entrycget(3, 'image') == str(mn_._marks[0])
+      and (mn_._marks[0].width(), mn_._marks[0].height()) == (mn_._marks[1].width(), mn_._marks[1].height()) and mn_._marks[0].width() >= 10,
+      (mn_.entrycget(2, 'image'), str(mn_._marks[0]), mn_._marks[0].width()))
 check('the window name is a readable heading (not a greyed-out entry, which Windows draws as small embossed text), in a clear colour and bold', str(mn_.entrycget(0, 'state')) == 'normal' and str(mn_.entrycget(0, 'foreground')) == app.th.accent_hi and 'bold' in str(mn_.entrycget(0, 'font')), (mn_.entrycget(0, 'state'), mn_.entrycget(0, 'foreground'), mn_.entrycget(0, 'font')))
 check('no entry in the menu is greyed out', all(str(mn_.entrycget(i_, 'state')) == 'normal' for i_ in range(mn_.index('end') + 1) if mn_.type(i_) != 'separator'))
 app.panel_opts.clear()
@@ -271,44 +389,28 @@ check('Grid off for the levels: the tick lines of the dB numbers are gone too', 
       and abs(app.c.coords(i_)[1] - app.c.coords(i_)[3]) < 0.01 and app.P['met'][0] < app.c.coords(i_)[0] < app.P['met'][2] and app.P['met'][1] + app.S(10) < app.c.coords(i_)[1] < app.bar_top + app.bar_h + 2 and app.c.coords(i_)[2] - app.c.coords(i_)[0] < app.S(60)])
 app.panel_opts.clear()
 app.refresh_panels()
-dglow = app.th.glow
-app.panel_menu_build('hist').invoke(5)  # Overburn
-check('Overburn toggled for the history only: its light level changes, the oscilloscope and the vectorscope keep what the theme gives',
-      app.panel_overburn('hist') == (not dglow) and app.beam_plot('hist').plot.glow == (1.0 if not dglow else 0.35) and app.beam_plot('osc').plot.glow == (1.0 if dglow else 0.35) and app.panel_overburn('vec') == dglow, (app.panel_opts, dglow))
-app.panel_menu_build('vec').invoke(5)
+check('the default CRT burn: the oscilloscope, spectrum and level history 0.4, the vectorscope 1.0, the levels 1.0 (Classic: the vectorscope only)',
+      all({n_: (lambda t_: (setattr(app, 'th', t_), app.panel_burn_level(n_))[1])(t_) for n_ in m.PANELS} == {'osc': 0.4, 'spec': 0.4, 'hist': 0.4, 'vec': 1.0, 'met': 1.0 if t_.glow else 0.4} for t_ in m.THEMES), [t_.name for t_ in m.THEMES])
+app.th = m.THEMES[app.theme_i]
+hm_ = app.panel_menu_build('hist')
+hm_.set_stepper(hm_.entries.index(hm_.stepper('CRT burn')), 10)  # 1.0
+check('CRT burn stepped to 1.0 for the history only: its glow changes, the oscilloscope and the vectorscope keep their own',
+      app.panel_burn_level('hist') == 1.0 and app.beam_plot('hist').plot.glow == 1.0 and app.beam_plot('osc').plot.glow == 0.4 and app.panel_burn_level('vec') == 1.0, (app.panel_opts, app.th.name))
+vm_ = app.panel_menu_build('vec')
+vm_.set_stepper(vm_.entries.index(vm_.stepper('CRT burn')), 4)  # 0.4
 app.draw()
-check('and for the vectorscope: its beam screen has the other light level', app.plots['vec'].plot.glow == (1.0 if not dglow else 0.35), app.plots['vec'].plot.glow)
+check('and for the vectorscope (1.0 by default): its beam screen gets the new glow', app.panel_burn_level('vec') == 0.4 and app.plots['vec'].plot.glow == 0.4, app.plots['vec'].plot.glow)
 app.panel_opts.clear()
 app.refresh_panels()
-# CRT glow off: clean lines instead of the phosphor, and no Overburn to choose
-rgbs_ = lambda c_: tuple(int(c_[i_:i_ + 2], 16) for i_ in (1, 3, 5))
-app.panel_menu_build('osc').invoke(4)  # CRT glow
-app.work_ms = 0.0  # (the oscilloscope skips every other frame when a frame took long: not while testing)
-app.draw()
-osc_img = np.asarray(app.plots['osc'].plot.image())
-check('CRT glow off for the oscilloscope: clean lines (the plain line in the exact channel colour, no glow round it), the other windows keep the CRT look',
-      app.panel_opts['osc']['crt'] is False and type(app.plots['osc'].plot).__name__ == 'CleanPlot' and bool((osc_img == np.array(rgbs_(app.th.left))).all(axis=2).any()) and bool((osc_img == np.array(rgbs_(app.th.right))).all(axis=2).any())
-      and type(app.beam_plot('spec').plot).__name__ == 'BeamPlot' and type(app.beam_plot('hist').plot).__name__ == 'BeamPlot', (app.panel_opts, type(app.plots['osc'].plot).__name__))
-check('...only the newest line is there (nothing lingers), and a quiet frame after a loud one leaves no trace of it', len(app.plots['osc'].plot.lines[0]) == 1 and len(app.plots['osc'].plot.lines[1]) == 1, [len(v_) for v_ in app.plots['osc'].plot.lines])
-check('...and Overburn is not in the menu while CRT glow is off', 'Overburn' not in menu_labels(app.panel_menu_build('osc')) and menu_labels(app.panel_menu_build('osc'))[:4] == ['Oscilloscope', 'Grid', 'Info', 'CRT glow'], menu_labels(app.panel_menu_build('osc')))
-app.panel_menu_build('vec').invoke(4)
-app.draw()
-vimg = np.asarray(app.plots['vec'].plot.image())
-check('CRT glow off for the vectorscope: a clean line in the vectorscope colour on the plain background', type(app.plots['vec'].plot).__name__ == 'CleanVector' and app.plots['vec'].plot.screen.u is not None and bool((vimg == np.array(rgbs_(app.panel_vec_color()))).all(axis=2).any())
-      and tuple(vimg[2, 2]) == rgbs_(app.BG), (type(app.plots['vec'].plot).__name__, tuple(vimg[2, 2])))
-app.panel_menu_build('hist').invoke(4)
-app.draw()
-app.hist_key = None
-app.refresh_history()
-check('CRT glow off for the history: its line is drawn once (not three passes), clean', type(app.beam_plot('hist').plot).__name__ == 'CleanPlot' and [len(v_) for v_ in app.beam_plot('hist').plot.lines] == [1, 1], [len(v_) for v_ in app.beam_plot('hist').plot.lines])
-app.panel_menu_build('met').invoke(4)
-app.draw()
-met_img = np.asarray(app.plots['met'].plot.image())
-check('CRT glow off for the levels: flat bars (a handful of plain colours, no glow gradients)', app.plots['met'].plot.flat and len({tuple(v_) for v_ in met_img.reshape(-1, 3)}) <= 12, len({tuple(v_) for v_ in met_img.reshape(-1, 3)}))
-app.panel_menu_build('osc').invoke(4)
-check('CRT glow on again: the phosphor look is back, with Overburn in the menu', app.panel_opts['osc']['crt'] is True and type(app.beam_plot('osc').plot).__name__ == 'BeamPlot' and 'Overburn' in menu_labels(app.panel_menu_build('osc')), app.panel_opts)
-check('the earlier names of Overburn in the settings file are understood (glow, and classic the other way round)', m.clean_panel_opts({'osc': {'glow': True}, 'vec': {'classic': True}, 'hist': {'classic': False}}) == {'osc': {'overburn': True}, 'vec': {'overburn': False}, 'hist': {'overburn': True}}, m.clean_panel_opts({'osc': {'glow': True}}))
+app.set_spec_mode('spectrogram')
+sm_ = app.panel_menu_build('spec')
+check('the spectrogram has no CRT burn, no Overburn, no grid and no colours to choose (they do nothing to it): its menu is its name and Info', menu_labels(sm_) == ['Spectrogram', 'Info'], menu_labels(sm_))
+sm_.invoke(2)
+check('...and Info still turns its text off (and back on)', app.panel_opts['spec']['info'] is False and app.panel_menu_build('spec').index('end') == 2, app.panel_opts)
+app.panel_menu_build('spec').invoke(2)
 app.panel_opts.clear()
+app.set_spec_mode('spectrum')
+check('the spectrum menu has them all again', menu_labels(app.panel_menu_build('spec')) == ['Spectrum', 'Grid', 'Info', 'Left colour...', 'Right colour...'], menu_labels(app.panel_menu_build('spec')))
 app.refresh_panels()
 app.panel_opts.clear()
 app.refresh_panels()
@@ -342,6 +444,42 @@ check('Info off for the levels: the text block, the balance figure and the numbe
 check('Info is kept in the settings as true or false', (app.save_settings() or True) and json.load(open(m.SETTINGS))['panels']['met']['info'] is False and json.load(open(m.SETTINGS))['panels']['spec']['info'] is False, json.load(open(m.SETTINGS)).get('panels'))
 app.panel_opts.clear()
 app.refresh_panels()
+pf_h = app.panel_frame['hist']
+check('with its info on the level history keeps a column for its dB numbers, and a line at the end of it', app.P['hist'][0] - pf_h[0] == app.S(46) and app.gutters['hist'] == app.S(46), (app.P['hist'], pf_h))
+app.panel_menu_build('hist').invoke(3)  # Info off
+check('with its info off there is no column for numbers (no gap): the graph starts at the left of the window', app.gutters['hist'] == 0 and app.P['hist'][0] == app.panel_frame['hist'][0] and app.gutters['spec'] == app.S(46), (app.P['hist'], app.panel_frame['hist']))
+rect_at = lambda n_: [i_ for i_ in app.c.find_all() if app.c.type(i_) == 'rectangle' and tuple(app.c.coords(i_)) == tuple(float(v_) for v_ in (app.panel_frame.get(n_) or app.P[n_]))]
+check('every window has a frame while its grid is on', all(len(rect_at(n_)) == 1 for n_ in ('osc', 'vec', 'met', 'spec', 'hist')), {n_: len(rect_at(n_)) for n_ in ('osc', 'vec', 'met', 'spec', 'hist')})
+app.panel_menu_build('vec').invoke(2)  # Grid off
+app.panel_menu_build('osc').invoke(2)
+check('grid off in the normal layout keeps the border of the window (only the lines inside it go): the vectorscope keeps its box', len(rect_at('vec')) == 1 and len(rect_at('osc')) == 1 and len(rect_at('spec')) == 1 and len(rect_at('hist')) == 1 and len(app.c.find_withtag('vgrid')) == 0,
+      {n_: len(rect_at(n_)) for n_ in ('osc', 'vec', 'met', 'spec', 'hist')})
+base_osc = np.asarray(app.beam_plot('osc').plot.base)
+check('...and the frame stays in the oscilloscope picture too, but not its centre line', tuple(base_osc[0, 5]) == rgb_(app.th.grid) and tuple(base_osc[base_osc.shape[0] // 2, 5]) == rgb_(app.th.bg), (tuple(base_osc[0, 5]), tuple(base_osc[base_osc.shape[0] // 2, 5])))
+# full screen has a Grid and an Info of its own
+app.panel_opts.clear()
+app.refresh_panels()
+app.zoom_panel('vec')
+fm_ = app.panel_menu_build('vec')
+check('in full screen the menu says so, and its Grid and Info are the full screen ones (separate from the normal layout)', menu_labels(fm_)[0] == 'Vectorscope (full screen)' and fm_._on[:2] == (True, True), menu_labels(fm_)[0])
+fm_.invoke(2)  # Grid, in full screen
+check('Grid off in full screen: the settings key is the full screen one, the box round the vectorscope and its lines are gone, the normal layout keeps its own', app.panel_opts == {'vec': {'fs_grid': False}} and not rect_at('vec') and len(app.c.find_withtag('vgrid')) == 0, app.panel_opts)
+app.panel_menu_build('vec').invoke(3)  # Info, in full screen
+check('Info off in full screen too: the picture is edge to edge (nothing round it, no margin)', app.panel_opts['vec'] == {'fs_grid': False, 'fs_info': False} and app.zoom == 'vec' and app.P['vec'][0] == (app.CW - app.CH) // 2 and app.P['vec'][1] == 0, (app.panel_opts, app.P['vec'], app.CW, app.CH))
+app.zoom_panel(None)
+check('back in the normal layout everything of the vectorscope is still there: its box, its lines and its letters', len(rect_at('vec')) == 1 and len(app.c.find_withtag('vgrid')) == 3 and app.panel_grid('vec') and app.panel_info('vec'), app.panel_opts)
+app.zoom_panel('hist')
+app.panel_menu_build('hist').invoke(2)
+app.panel_menu_build('hist').invoke(3)
+check('an enlarged history with both off: edge to edge, no gap for numbers, no border', app.P['hist'] == (0, 0, app.CW - 1, app.CH - 1) and app.gutters['hist'] == 0 and not [i_ for i_ in app.c.find_all() if app.c.type(i_) == 'rectangle' and app.c.coords(i_)[0] < app.CW], (app.P['hist'], app.CW, app.CH))
+app.zoom_panel(None)
+check('and the normal layout of the history keeps its numbers, its grid and its border', app.gutters['hist'] == app.S(46) and len(rect_at('hist')) == 1 and app.panel_info('hist') and app.panel_grid('hist'), app.panel_opts)
+check('the full screen choices are kept in the settings file and read back', (app.save_settings() or True) and json.load(open(m.SETTINGS))['panels']['hist'] == {'fs_grid': False, 'fs_info': False}
+      and m.clean_panel_opts({'osc': {'fs_grid': False, 'fs_info': 'x', 'grid': True}}) == {'osc': {'fs_grid': False, 'grid': True}}, json.load(open(m.SETTINGS)).get('panels'))
+app.panel_opts.clear()
+app.refresh_panels()
+app.panel_opts.clear()
+app.refresh_panels()
 # the colours
 app.ask_color = lambda initial, title: '#12ab34'
 app.pick_panel_color('osc', 'left')
@@ -365,7 +503,7 @@ check('something that is not a #rrggbb colour is ignored', app.panel_opts == bef
 app.save_settings()
 saved_ = json.load(open(m.SETTINGS))
 check('the choices are kept in the settings file, and read back (anything invalid in it is dropped)', saved_['panels'] == app.panel_opts and m.clean_panel_opts(saved_['panels']) == app.panel_opts
-      and m.clean_panel_opts({'osc': {'grid': 'yes', 'left': '#GGGGGG', 'classic': True, 'info': 'no'}, 'bogus': {'grid': False}, 'vec': {'color': '#ABCDEF', 'left': '#123456'}, 'hist': 5}) == {'osc': {'overburn': False}, 'vec': {'color': '#abcdef'}}
+      and m.clean_panel_opts({'osc': {'grid': 'yes', 'left': '#GGGGGG', 'classic': True, 'info': 'no'}, 'bogus': {'grid': False}, 'vec': {'color': '#ABCDEF', 'left': '#123456'}, 'hist': 5}) == {'osc': {'burn': 0.4}, 'vec': {'color': '#abcdef'}}
       and m.clean_panel_opts(None) == {}, (saved_.get('panels'), app.panel_opts))
 app.panel_menu_build('osc').invoke(9)  # back to the theme colours
 app.reset_panel_colors('vec')
@@ -375,6 +513,110 @@ check('"back to the theme colours" gives the window the theme colours again, and
 del app.ask_color
 app.panel_opts.clear()
 app.refresh_panels()
+# ---- CRT burn (0 = clean lines, to 3, steps of 0.1) and Line strength (0 to 10) are steppers in the menu of the beam windows
+app.go_live()
+pump(root, 0.2)
+app.panel_opts.clear()
+app.refresh_panels()
+for n_ in ('osc', 'vec', 'spec', 'hist'):
+    app.draw()
+bm_ = {n_: app.panel_menu_build(n_) for n_ in ('osc', 'vec', 'spec', 'hist', 'met')}
+check('CRT burn and Line strength are stepper rows in the menu of the oscilloscope, vectorscope, spectrum and history; the levels have CRT burn only',
+      all(stepper_labels(bm_[n_]) == ['CRT burn', 'Line strength'] for n_ in ('osc', 'vec', 'spec', 'hist')) and stepper_labels(bm_['met']) == ['CRT burn'], [stepper_labels(bm_[n_]) for n_ in bm_])
+check('the start: CRT burn 0.4 (the vectorscope 1.0, the levels 1.0 unless the theme is Classic), Line strength 6, none for the levels',
+      [app.panel_burn_level(n_) for n_ in ('osc', 'spec', 'hist', 'vec', 'met')] == [0.4, 0.4, 0.4, 1.0, 1.0 if app.th.glow else 0.4] and all(app.panel_strength(n_) == 6 for n_ in ('osc', 'vec', 'spec', 'hist')) and app.panel_strength('met') == 1
+      and [m.burn_text(n_) for n_ in (0, 4, 14, 30)] == ['Off', '0.4', '1.4', '3.0'] and [m.strength_text(n_) for n_ in (1, 6, 9, 10)] == ['1', '6', '9', '10'], bm_['osc']._on)
+lifts_ = {n_: [sc_.lift for sc_ in app.beam_plot(n_).plot.screens] for n_ in ('osc', 'spec', 'hist', 'met')}
+lifts_['vec'] = [app.plots['vec'].plot.screen.lift]
+check('the beams are drawn with the Light lift (0.75) and their glow; the level bars as they were', all(abs(v_[0] - 0.75) < 1e-9 for n_, v_ in lifts_.items() if n_ != 'met') and lifts_['met'] == [1.0, 1.0]
+      and app.beam_plot('osc').plot.glow == 0.4 and app.plots['vec'].plot.glow == 1.0, lifts_)
+# stepping: live, without building the window again
+pl_before = app.beam_plot('osc')
+mo_ = app.panel_menu_build('osc')
+i_burn = mo_.entries.index(mo_.stepper('CRT burn'))
+i_str = mo_.entries.index(mo_.stepper('Line strength'))
+moved_ = mo_.step(i_burn, 1)
+check('a step of CRT burn: 0.5, the beam is drawn with it at once and the picture is not started again; it is in the settings file',
+      moved_ and app.panel_burn_level('osc') == 0.5 and app.beam_plot('osc') is pl_before and pl_before.plot.glow == 0.5 and json.load(open(m.SETTINGS))['panels']['osc']['burn'] == 0.5, (app.panel_opts, moved_))
+mo_.set_stepper(i_burn, 30)
+check('up to 3.0 and no further', app.panel_burn_level('osc') == 3.0 and pl_before.plot.glow == 3.0 and not mo_.step(i_burn, 1) and mo_.stepper('CRT burn')['n'] == 30, app.panel_opts)
+mo_.step(i_str, 3)
+check('Line strength: 9 lifts the beam with 0.6 at once, the others keep theirs, and it is in the settings file',
+      app.panel_strength('osc') == 9 and all(abs(sc_.lift - 0.6) < 1e-9 for sc_ in pl_before.plot.screens) and abs(app.beam_plot('hist').plot.screens[0].lift - 0.75) < 1e-9
+      and json.load(open(m.SETTINGS))['panels']['osc']['strength'] == 9 and app.beam_plot('osc') is pl_before, (app.panel_opts, [sc_.lift for sc_ in pl_before.plot.screens]))
+mo_.set_stepper(i_str, 0)
+check('Line strength 1 (the lowest) is the beam as it is: no lift at all, and it does not go below', app.panel_strength('osc') == 1 and mo_.stepper('Line strength')['n'] == 1 and not mo_.step(i_str, -1) and [sc_.lift for sc_ in pl_before.plot.screens] == [1.0, 1.0], [sc_.lift for sc_ in pl_before.plot.screens])
+mo_.set_stepper(i_burn, 0)
+mq_ = app.panel_menu_build('osc')
+check('CRT burn 0 is clean lines: the window is made again without the beam, and Line strength is not offered', not app.panel_crt('osc') and app.beam_plot('osc').plot.clean and not mo_.visible(mo_.stepper('Line strength')) and not mq_.visible(mq_.stepper('Line strength'))
+      and mq_.stepper('CRT burn')['n'] == 0, app.panel_opts)
+mo_.set_stepper(i_burn, 5)
+check('and back to 0.5: the beam is back, with the strength it had', app.panel_crt('osc') and not app.beam_plot('osc').plot.clean and app.beam_plot('osc').plot.glow == 0.5 and app.panel_strength('osc') == 1 and mo_.visible(mo_.stepper('Line strength')), app.panel_opts)
+ml_ = app.panel_menu_build('met')
+ml_.set_stepper(ml_.entries.index(ml_.stepper('CRT burn')), 20)
+check('the levels step too (2.0)', app.panel_burn_level('met') == 2.0 and app.beam_plot('met').plot.glow == 2.0, app.panel_opts.get('met'))
+check('settings: CRT burn is 0 to 3 in tenths, Line strength 1 to 10; the older Off / On / Overburn and Default / Light / Strong choices are read as numbers; anything else is dropped',
+      m.clean_panel_opts({'osc': {'burn': 1.26, 'strength': 7}}) == {'osc': {'burn': 1.3, 'strength': 7}} and m.clean_panel_opts({'osc': {'burn': 3.5}}) == {} and m.clean_panel_opts({'osc': {'burn': True, 'strength': 11}}) == {} and m.clean_panel_opts({'osc': {'strength': 0}}) == {}
+      and m.clean_panel_opts({'osc': {'crt': False, 'overburn': True}}) == {'osc': {'burn': 0.0}} and m.clean_panel_opts({'osc': {'overburn': True}}) == {'osc': {'burn': 1.0}}
+      and m.clean_panel_opts({'osc': {'overburn': False}}) == {'osc': {'burn': 0.4}} and m.clean_panel_opts({'osc': {'glow': True}}) == {'osc': {'burn': 1.0}} and m.clean_panel_opts({'osc': {'classic': True}}) == {'osc': {'burn': 0.4}}
+      and m.clean_panel_opts({'osc': {'strength': 'Strong'}}) == {'osc': {'strength': 9}} and m.clean_panel_opts({'osc': {'bold': True}}) == {'osc': {'strength': 6}} and m.clean_panel_opts({'osc': {'bold': 'Off'}}) == {'osc': {'strength': 1}}
+      and m.clean_panel_opts({'osc': {'strength': 'Nope'}}) == {})
+app.panel_opts.clear()
+app.refresh_panels()
+
+# ---- the starting choices of a first run (the tests run with everything on and the first theme; here the shipped ones are checked and tried)
+import types
+sh_ = m.SHIPPED
+th_sh = [t_ for t_ in m.THEMES if t_.name == sh_['theme']][0]
+check('the shipped theme is Orange + blue', sh_['theme'] == 'Orange + blue' and th_sh.name == 'Orange + blue', sh_['theme'])
+m.PANEL_DEFAULTS.update(sh_['panels'])
+try:
+    stub_ = types.SimpleNamespace(panel_opts={}, zoom=None, th=th_sh)
+    stub_.panel_burn_level = lambda n_: m.App.panel_burn_level(stub_, n_)
+    normal_ = {n_: (m.App.panel_grid(stub_, n_), m.App.panel_info(stub_, n_)) for n_ in m.PANELS}
+    full_ = {}
+    for n_ in m.PANELS:
+        stub_.zoom = n_
+        full_[n_] = (m.App.panel_grid(stub_, n_), m.App.panel_info(stub_, n_))
+    stub_.zoom = None
+    check('first run, normal layout: grid and info on everywhere, except the spectrum which starts without its grid', normal_ == {'osc': (True, True), 'vec': (True, True), 'met': (True, True), 'spec': (False, True), 'hist': (True, True)}, normal_)
+    check('first run, enlarged: clean (no grid, no info) for the oscilloscope, vectorscope, levels and history; the spectrum has no grid but keeps its range names',
+          full_ == {'osc': (False, False), 'vec': (False, False), 'met': (False, False), 'spec': (False, True), 'hist': (False, False)}, full_)
+    burn_ = {n_: m.App.panel_burn_level(stub_, n_) for n_ in m.PANELS}
+    check('first run: the oscilloscope, spectrum and history start on CRT burn 0.4, the vectorscope and levels on 1.0; every beam window starts on Line strength 6',
+          burn_ == {'osc': 0.4, 'vec': 1.0, 'met': 1.0 if th_sh.glow else 0.4, 'spec': 0.4, 'hist': 0.4} and all(m.App.panel_crt(stub_, n_) for n_ in m.PANELS)
+          and all(m.App.panel_strength(stub_, n_) == 6 for n_ in ('osc', 'vec', 'spec', 'hist')) and m.App.panel_strength(stub_, 'met') == 1, burn_)
+    stub_.panel_opts = {'spec': {'grid': True}, 'osc': {'fs_info': True, 'fs_grid': True}}
+    stub_.zoom = 'osc'
+    check('a choice made in a window\'s menu wins over the starting one', m.App.panel_grid(stub_, 'spec') is True and m.App.panel_grid(stub_, 'osc') is True and m.App.panel_info(stub_, 'osc') is True and m.App.panel_info(stub_, 'hist') is True, stub_.panel_opts)
+    stub_.zoom = None
+    check('...and the spectrum\'s own grid choice in the normal layout', m.App.panel_grid(stub_, 'spec') is True)
+    # the real window with the shipped choices: every window enlarged and back
+    app.panel_opts.clear()
+    app.refresh_panels()
+    for n_ in ('osc', 'vec', 'hist', 'met', 'spec'):
+        app.zoom_panel(n_)
+        for _ in range(2):
+            app.draw()
+            pump(root, 0.05)
+        edge_ = app.P[n_] == (0, 0, app.CW - 1, app.CH - 1)
+        if n_ == 'vec':  # (square, in the middle)
+            edge_ = app.P['vec'][0] == (app.CW - app.CH) // 2 and app.P['vec'][1] == 0
+        if n_ == 'met':  # (the levels keep their shape)
+            edge_ = True
+        check('shipped choices, %s enlarged: %s' % (n_, 'its range names stay, no grid' if n_ == 'spec' else 'clean'),
+              (not app.panel_grid(n_) and app.panel_info(n_)) if n_ == 'spec' else (edge_ and not app.panel_grid(n_) and not app.panel_info(n_)), (app.P[n_], app.CW, app.CH))
+        app.zoom_panel(None)
+    no_error('the shipped choices, every window enlarged')
+    sp_ = app.panel_menu_build('spec')
+    check('shipped choices, normal layout: the spectrum menu shows Grid off and Info on, the others have both on', sp_._on[:2] == (False, True) and all(app.panel_menu_build(n_)._on[:2] == (True, True) for n_ in ('osc', 'vec', 'hist', 'met')), sp_._on)
+    xx0_, yy0_, xx1_, yy1_ = app.P['spec']
+    check('shipped choices: no band dividers under the spectrum (its grid is off), the names are there', not [i_ for i_ in app.c.find_withtag('spec') if app.c.type(i_) == 'line' and app.c.coords(i_)[3] > yy1_ + 3] and any(app.c.type(i_) == 'text' for i_ in app.c.find_withtag('spec')))
+finally:
+    m.PANEL_DEFAULTS.clear()
+    app.panel_opts.clear()
+    app.refresh_panels()
+
 no_error('after the window menus')
 check('live: the timeline and the rows under the transport are collapsed', app.mode == 'live' and app.tl.winfo_manager() == '' and app.clip_row.winfo_manager() == '' and app.cmp_row.winfo_manager() == '', (app.tl.winfo_manager(), app.clip_row.winfo_manager()))
 
@@ -382,6 +624,16 @@ check('live: the timeline and the rows under the transport are collapsed', app.m
 app.rec_toggle()
 pump(root, 0.5)
 check('recording opens the timeline', app.mode == 'rec' and app.tl.winfo_manager() == 'pack', (app.mode, app.tl.winfo_manager()))
+app.tl_key, app.tl_built = None, 0.0
+app.draw_timeline()
+k_real = app.tl_key
+app.tl_key = k_real[:3] + (-1,) + k_real[4:]  # (something about the timeline changed ...)
+app.tl_built = time.perf_counter()  # ... just now made
+app.draw_timeline()
+held = app.tl_key == k_real[:3] + (-1,) + k_real[4:]
+app.tl_built = time.perf_counter() - 0.2
+app.draw_timeline()
+check('recording: the timeline is not made again within 55 ms, and is after that', held and app.tl_key[3] != -1 and app.tl_built > time.perf_counter() - 0.1, (held, app.tl_key[3]))
 app.marker_add()
 pump(root, 2.5)
 app.rec_toggle()
@@ -796,7 +1048,7 @@ for _ in m.THEMES:
 check('cycling through every theme comes back to the first', app.th.name == first)
 app.cycle_theme()
 pump(root, 0.6)
-check('a theme with glow draws its graphs with a halo: the oscilloscope, spectrum and history screens are phosphor pictures at full glow', app.th.glow and all(app.plots[n_].plot.glow == 1.0 for n_ in ('osc', 'spec', 'hist')) and app.plots['hist'].plot.blend == 'white' and all(app.photos.get(n_) is not None for n_ in ('osc', 'spec', 'hist')), (app.th.name, sorted(app.plots), sorted(app.photos)))
+check('a theme with glow draws its graphs as phosphor pictures: the oscilloscope, spectrum and history at the low light level, the vectorscope and the levels at the high one', app.th.glow and all(app.plots[n_].plot.glow == 0.4 for n_ in ('osc', 'spec', 'hist')) and app.plots['vec'].plot.glow == 1.0 and app.plots['met'].plot.glow == 1.0 and app.plots['hist'].plot.blend == 'white' and all(app.photos.get(n_) is not None for n_ in ('osc', 'spec', 'hist')), (app.th.name, sorted(app.plots), sorted(app.photos)))
 check('changing the theme prints no message (the change is obvious)', 'theme' not in app.lbl_msg.cget('text').lower(), app.lbl_msg.cget('text'))
 app.set_spec_mode('spectrogram')
 pump(root, 1.0)
@@ -808,7 +1060,7 @@ app.theme_i = 0
 app.use_theme()
 app.build_ui()
 pump(root, 0.5)
-check('Classic keeps crisp lines: a weaker halo', not app.th.glow and all(app.plots[n_].plot.glow < 0.5 for n_ in ('osc', 'spec')), (app.th.glow, {n_: app.plots[n_].plot.glow for n_ in app.plots if n_ != 'vec'}))
+check('Classic is as it was: crisp lines (a weaker halo) everywhere but the vectorscope, which keeps its glow', not app.th.glow and all(app.plots[n_].plot.glow < 0.5 for n_ in ('osc', 'spec', 'hist', 'met')) and app.plots['vec'].plot.glow == 1.0, (app.th.glow, {n_: app.plots[n_].plot.glow for n_ in app.plots}))
 app.compare_start(ca, cb, auto=False)
 app.cycle_theme()
 pump(root, 0.5)

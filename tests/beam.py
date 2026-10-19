@@ -132,4 +132,81 @@ for b_ in (bl_white, bl_max2):
 iw, im2 = np.asarray(bl_white.image()).astype(int), np.asarray(bl_max2.image()).astype(int)
 check('blend white: where both channels are lit the line is much whiter than with max (no colour cast left)', iw[25, 50].min() > im2[25, 50].min() + 25 and iw[25, 50].min() > 0.75 * iw[25, 50].max(), (iw[25, 50].tolist(), im2[25, 50].tolist()))
 check('blend white: a channel on its own keeps its colour exactly as with max', iw[8, 50].tolist() == im2[8, 50].tolist() and iw[42, 50].tolist() == im2[42, 50].tolist() and abs(iw[8, 50][0] - iw[8, 50][2]) > 40, (iw[8, 50].tolist(), im2[8, 50].tolist(), iw[42, 50].tolist()))
+
+# ---- only the rows that have light are worked out and put on screen
+def lined(pl, rng, n=6):
+    for _ in range(n):
+        for ch in range(2):
+            pl.add(ch, np.linspace(0, pl.w - 1, 140), pl.h * (0.3 + 0.4 * rng.random(140)), 0.033)
+
+
+for (bw, bh) in ((100, 50), (1500, 300), (605, 277)):
+    rng_ = np.random.default_rng(bw)
+    base_ = np.full((bh, bw, 3), rgb(th.bg), np.uint8)
+    base_[bh // 2, :] = rgb(th.grid)
+    pl_ = m.BeamPlot(base_.copy(), th.bg, (th.left, th.right), 0.04, 3.2, 0.25, 64, 1.0, 'add')
+    lined(pl_, rng_)
+    full_ = np.asarray(pl_.image()).astype(int)
+    ar_ = pl_.active_rows()
+    worst = 0
+    for y0_, y1_ in ((0, bh), (bh // 5, bh // 2), (ar_[0], ar_[1]), (bh // 2, bh - 1)):
+        if y1_ > y0_:
+            worst = max(worst, int(np.abs(np.asarray(pl_.image_rows(y0_, y1_)).astype(int) - full_[y0_:y1_]).max()))
+    check('image_rows: any rows of the picture made alone are the same rows of the whole picture (%dx%d, to within a level)' % (bw, bh), worst <= 2, worst)
+    outside_ = np.concatenate([full_[:ar_[0]], full_[ar_[1]:]])
+    check('active_rows: every row outside them is exactly the background (%dx%d), and the rows with light are inside them' % (bw, bh), bool((outside_ == np.concatenate([base_[:ar_[0]], base_[ar_[1]:]]).astype(int)).all()) and 0 < ar_[1] - ar_[0] < bh + 1, ar_)
+quiet_ = m.BeamPlot(np.full((50, 100, 3), rgb(th.bg), np.uint8), th.bg, (th.left, th.right), 0.04, 3.2)
+check('active_rows: a picture without light has no rows with light', quiet_.active_rows() == (0, 0), quiet_.active_rows())
+
+# a banded worker hands over the rows that differ from the background; shown on top of the background (as the window does, skipping some pictures when it is slow) they always give the whole picture
+for (bw, bh) in ((120, 60), (1500, 300)):
+    rng_ = np.random.default_rng(bw + 1)
+    base_ = np.full((bh, bw, 3), rgb(th.bg), np.uint8)
+    pl_ = m.BeamPlot(base_.copy(), th.bg, (th.left, th.right), 0.03, 3.2, 0.25, 64, 1.0, 'add')
+    wkb = m.BeamWorker(pl_, threaded=False, banded=True)
+    bad = 0
+    bands_seen = []
+    shown_ = base_.astype(int).copy()
+    for step in range(60):
+        ysb = bh * (0.3 + 0.4 * rng_.random())
+        xs_b = np.linspace(0, bw - 1, 60)
+        wkb.add(lambda pl, ysb=ysb, xs_b=xs_b, rng_=rng_: [pl.add(ch, xs_b, ysb + 0.05 * bh * np.sin(xs_b * (0.05 + 0.1 * ch)) + rng_.random(60) * 3, 0.033) for ch in range(2)])
+        if rng_.random() < 0.55:  # the window comes for a picture (not after every one)
+            img_ = wkb.take()
+            if wkb.fresh:
+                bd_ = wkb.last_band
+                bands_seen.append(bd_)
+                shown_ = base_.astype(int).copy()  # the background, and on top of it the rows with light
+                if img_ is not None:
+                    shown_[bd_[0]:bd_[1]] = np.asarray(img_).astype(int)
+                bad = max(bad, int(np.abs(shown_ - np.asarray(pl_.image()).astype(int)).max()))
+    check('banded BeamWorker (%dx%d): the rows with light shown over the background, some pictures skipped, always give the whole picture (to within a level)' % (bw, bh), bad <= 2 and any(b_ != (0, bh) for b_ in bands_seen), (bad, bands_seen[:4]))
+    check('banded BeamWorker (%dx%d): a band is only the rows that differ from the background, and fresh says when there is a new picture' % (bw, bh), all(b_[1] - b_[0] < bh for b_ in bands_seen) and (wkb.take(), wkb.take() is None and wkb.fresh is False)[1], bands_seen[:3])
+ordered_ = m.pool_map(lambda v_: v_ * v_, list(range(12)))
+check('pool_map: the results come back in order', ordered_ == [v_ * v_ for v_ in range(12)], ordered_)
+
+# ---- line strength: the weak end of the beam's brightness raised, the glow and the bright end as they were
+lt_ = np.array(m._lift_table(0.7))
+check('_lift_table: 0 stays 0, 255 stays 255, it only goes up, in order', lt_[0] == 0 and lt_[255] == 255 and bool((lt_ >= np.arange(256)).all()) and bool((np.diff(lt_) >= 0).all()) and lt_[20] > 35, (lt_[:3].tolist(), lt_[20], lt_[255]))
+check('_lift_table: a lift of 1 changes nothing', m._lift_table(1.0) == list(range(256)))
+for lift_ in (0.75, 0.6):
+    pair_ = []
+    for l_ in (1.0, lift_):
+        sc_ = m.BeamScreen(120, 80, 0.05, 3.2)
+        sc_.lift = l_
+        sc_.buf[40, 20:100] = 0.02  # a weak line
+        sc_.buf[20, 20:100] = 5.0  # a strong one
+        pair_.append(np.asarray(sc_.render(m.beam_palette('#07090d', '#ff8a1f'), 1.0)).astype(int))
+    plain_, bold_ = pair_
+    check('line strength (%.2f): the picture is never darker, the weak line is clearly brighter, the strong one and the empty parts are as they were' % lift_,
+          bool((bold_ >= plain_).all()) and bold_[40, 60].sum() > 1.2 * plain_[40, 60].sum() and bold_[20, 60].tolist() == plain_[20, 60].tolist() and bold_[75, 5].tolist() == plain_[75, 5].tolist(),
+          (plain_[40, 60].tolist(), bold_[40, 60].tolist(), plain_[20, 60].tolist(), bold_[20, 60].tolist()))
+pl_b = m.BeamPlot(np.full((60, 200, 3), (7, 9, 13), np.uint8), '#07090d', ('#2fb5ff', '#ff8a1f'), 0.04, 3.2, 0.25, 64, 0.35, 'add')
+for sc_ in pl_b.screens:
+    sc_.lift = 0.7
+pl_b.add(0, np.linspace(0, 199, 80), 30 + 10 * np.sin(np.linspace(0, 9, 80)), 0.033)
+whole_ = np.asarray(pl_b.image()).astype(int)
+ar_ = pl_b.active_rows()
+rows_ = np.asarray(pl_b.image_rows(ar_[0], ar_[1])).astype(int)
+check('line strength: the rows worked out alone are the same rows of the whole picture, and no row outside the active ones has any light', int(np.abs(rows_ - whole_[ar_[0]:ar_[1]]).max()) <= 2 and bool((np.concatenate([whole_[:ar_[0]], whole_[ar_[1]:]]) == np.array([7, 9, 13])).all()), ar_)
 T.finish()

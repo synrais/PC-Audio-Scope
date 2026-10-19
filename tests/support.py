@@ -33,6 +33,10 @@ def sandbox():
     tmp = tempfile.mkdtemp(prefix='scope_test_')
     m.SETTINGS = os.path.join(tmp, 'settings.json')
     m.REC_DIR = os.path.join(tmp, 'rec')
+    # the tests check the layout logic with everything on and the first theme; the shipped starting choices are kept in m.SHIPPED and checked (and tried) in functional.py
+    m.SHIPPED = {'panels': {k: dict(v) for k, v in m.PANEL_DEFAULTS.items()}, 'theme': m.DEFAULT_THEME}
+    m.PANEL_DEFAULTS.clear()
+    m.DEFAULT_THEME = m.THEMES[0].name
     return tmp
 
 
