@@ -51,6 +51,21 @@ check('real mouse events: the fourth click is the second of a new double click a
 app.click_last = None
 pump(root, 0.5)
 
+# ---- a scope enlarged: it is the whole window, nothing else in it
+root.update_idletasks()
+ww0, wh0 = root.winfo_width(), root.winfo_height()
+app.zoom_panel('spec')
+pump(root, 0.8)
+check('an enlarged scope: the canvas is as big as the window (which keeps its size), and the button rows are gone', (app.c.winfo_width(), app.c.winfo_height()) == (ww0, wh0) == (root.winfo_width(), root.winfo_height()) and app.controls.winfo_manager() == '' and app.transport.winfo_manager() == '', (app.c.winfo_width(), app.c.winfo_height(), ww0, wh0))
+check('the enlarged scope fills the canvas to a small margin', app.panel_frame['spec'][0] == app.S(8) and app.panel_frame['spec'][2] == ww0 - app.S(8) and app.panel_frame['spec'][1] == app.S(8), (app.panel_frame['spec'], ww0))
+root.geometry('%dx%d' % (ww0 - 100, wh0 - 60))
+pump(root, 1.0)
+check('resizing the window refits the enlarged scope to it', app.zoom == 'spec' and (app.CW, app.CH) == (root.winfo_width(), root.winfo_height()) and app.panel_frame['spec'][2] == root.winfo_width() - app.S(8), (app.CW, app.CH, root.winfo_width(), root.winfo_height()))
+root.geometry('%dx%d' % (ww0, wh0))
+pump(root, 1.0)
+app.zoom_panel(None)
+pump(root, 1.0)
+check('back again: the rows are in place and the window is as tall as its content', app.zoom is None and app.controls.winfo_manager() == 'pack' and app.transport.winfo_manager() == 'pack' and root.winfo_height() == root.winfo_reqheight() and (app.CW, app.CH) == (app.S(app.BASE_W), app.S(app.BASE_H)), (root.winfo_height(), root.winfo_reqheight(), app.CW, app.CH))
 # ---- the graphs are drawn on their own threads and the window thread stays light
 import threading
 import time

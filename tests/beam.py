@@ -122,4 +122,14 @@ for b_ in (bl_add, bl_max):
         b_.add(ch, np.linspace(5, 95, 200), np.full(200, 25.0), 0.0)
 p_add, p_max = np.asarray(bl_add.image())[25, 50].astype(int), np.asarray(bl_max.image())[25, 50].astype(int)
 check('blend: added light on top of each other is whiter than the brighter of the two', p_add.sum() > p_max.sum() + 40, (p_add.tolist(), p_max.tolist()))
+bl_white = m.BeamPlot(m.plot_base(100, 50, th.bg, th.grid), th.bg, (th.left, th.right), 0.03, 0.15, blend='white')
+bl_max2 = m.BeamPlot(m.plot_base(100, 50, th.bg, th.grid), th.bg, (th.left, th.right), 0.03, 0.15, blend='max')
+for b_ in (bl_white, bl_max2):
+    for ch in (0, 1):
+        b_.add(ch, np.linspace(5, 95, 200), np.full(200, 25.0), 0.0)  # both channels on one line
+    b_.add(0, np.linspace(5, 95, 200), np.full(200, 8.0), 0.0)  # and each alone on a line of its own
+    b_.add(1, np.linspace(5, 95, 200), np.full(200, 42.0), 0.0)
+iw, im2 = np.asarray(bl_white.image()).astype(int), np.asarray(bl_max2.image()).astype(int)
+check('blend white: where both channels are lit the line is much whiter than with max (no colour cast left)', iw[25, 50].min() > im2[25, 50].min() + 25 and iw[25, 50].min() > 0.75 * iw[25, 50].max(), (iw[25, 50].tolist(), im2[25, 50].tolist()))
+check('blend white: a channel on its own keeps its colour exactly as with max', iw[8, 50].tolist() == im2[8, 50].tolist() and iw[42, 50].tolist() == im2[42, 50].tolist() and abs(iw[8, 50][0] - iw[8, 50][2]) > 40, (iw[8, 50].tolist(), im2[8, 50].tolist(), iw[42, 50].tolist()))
 T.finish()

@@ -1033,7 +1033,7 @@ class BeamPlot:
         self.screens = [BeamScreen(rw, rh, tau, exposure) for _ in range(2)]
         self.luts = [beam_palette(bg, c, light=True) for c in colors]
         self.base = Image.fromarray(base, 'RGB')
-        self.power, self.max_bits, self.glow, self.blend = power, max_bits, glow, blend  # blend: where the two channels overlap, 'add' their light (white-hot) or keep the 'max' of the two (each keeps its colour)
+        self.power, self.max_bits, self.glow, self.blend = power, max_bits, glow, blend  # blend: where the two channels overlap, 'add' their light (white-hot), keep the 'max' of the two (each keeps its colour) or 'white' (the max, turned white by how much of both there is)
 
     def clear(self):
         for sc in self.screens:
@@ -1045,10 +1045,15 @@ class BeamPlot:
 
     def image(self):
         from PIL import ImageChops
-        light = None
-        for sc, lut in zip(self.screens, self.luts):
-            im = sc.render(lut, self.glow)
-            light = im if light is None else (ImageChops.lighter(light, im) if self.blend == 'max' else ImageChops.add(light, im))
+        ims = [sc.render(lut, self.glow) for sc, lut in zip(self.screens, self.luts)]
+        if self.blend == 'max':
+            light = ImageChops.lighter(ims[0], ims[1])
+        elif self.blend == 'white':  # each channel keeps its colour; where both are lit the light turns white, by as much as the weaker of the two is there
+            light = ImageChops.lighter(ims[0], ims[1])
+            both = ImageChops.darker(ims[0].convert('L'), ims[1].convert('L')).point(_gain_table(1.5))
+            light = ImageChops.screen(light, Image.merge('RGB', (both, both, both)))
+        else:
+            light = ImageChops.add(ims[0], ims[1])
         if self.f != 1.0:
             light = light.resize((self.w, self.h), Image.Resampling.BILINEAR)  # one enlargement for both channels
         return ImageChops.add(self.base, light)  # light added to the background, never past white
@@ -1995,11 +2000,20 @@ class App:
     def F(self, size, fam='Consolas', bold=False):
         return (FONTS.get(fam, fam), max(6, int(round(size * self.k)))) + (('bold',) if bold else ())
 
+    def canvas_size(self):
+        """the size of the canvas: the scope area, or the whole window while a scope fills it (then nothing else shows in the window)"""
+        S = self.S
+        if self.zoom is not None:
+            w, h = self.root.winfo_width(), self.root.winfo_height()
+            if w >= 300 and h >= 200:  # (a window that is not on screen yet has no size)
+                return w, h, S(self.BASE_TH)
+        return S(self.BASE_W), S(self.BASE_H), S(self.BASE_TH)
+
     def build_ui(self):
         for w in self.root.winfo_children():
             w.destroy()
         S = self.S
-        self.CW, self.CH, self.TH = S(self.BASE_W), S(self.BASE_H), S(self.BASE_TH)
+        self.CW, self.CH, self.TH = self.canvas_size()
         self.c = tk.Canvas(self.root, width=self.CW, height=self.CH, bg=self.BG, highlightthickness=0)
         self.c.pack()
         self.c.bind('<Button-1>', self.scope_press)  # a single click does nothing: it takes a double click (counted here, see scope_press) to enlarge a scope or to go back
@@ -2024,12 +2038,14 @@ class App:
         S, c = self.S, self.c
         base = dict(osc=(10, 44, 610, 320), vec=(625, 44, 901, 320), met=(916, 44, 1230, 320), spec=(10, 352, 610, 630), hist=(625, 352, 1230, 630))
         zoom = self.zoom
-        zoomed = dict(osc=(10, 44, 1230, 662), vec=(311, 44, 929, 662), spec=(10, 44, 1230, 630), hist=(10, 44, 1230, 662))
+        m_, CW, CH = S(8), self.CW, self.CH  # a zoomed panel fills the canvas (the whole window) with a small margin; the vectorscope stays square; the spectrum leaves room for its range names
+        side = min(CW, CH) - 2 * m_
+        zoomed = dict(osc=(m_, m_, CW - m_, CH - m_), vec=((CW - side) // 2, (CH - side) // 2, (CW - side) // 2 + side, (CH - side) // 2 + side), spec=(m_, m_, CW - m_, CH - m_ - S(32)), hist=(m_, m_, CW - m_, CH - m_))
         away = self.CW + S(100)  # panels that are not shown are built this far to the right, out of sight
         hid = lambda n: zoom is not None and n != zoom
         self.P = {}
         for n, r in base.items():
-            r = tuple(S(v) for v in (zoomed[n] if n == zoom else r))
+            r = zoomed[n] if n == zoom else tuple(S(v) for v in r)
             self.P[n] = (r[0] + away, r[1], r[2] + away, r[3]) if hid(n) else r
         for x0, y0, x1, y1 in self.P.values():
             c.create_rectangle(x0, y0, x1, y1, outline=self.GRID)
@@ -2043,13 +2059,13 @@ class App:
 
         def t(x, y, s, out=False, **k):
             return c.create_text(S(x) + (away if out else 0), S(y), text=s, fill=k.pop('fill', self.TXT), font=self.F(k.pop('size', 9)), anchor=k.pop('anchor', 'nw'), **k)
-        self.status = t(10, 8, '', size=10)
+        self.status = t(10, 8, '', zoom is not None, size=10)
         self.dc_txt = t(985, 28, '', zoom is not None)
-        t(10, 28, 'OSCILLOSCOPE   left = %s, right = %s' % (self.th.lname, self.th.rname), hid('osc'))
-        t(311 if zoom == 'vec' else 625, 28, 'VECTORSCOPE', hid('vec'))
+        t(10, 28, 'OSCILLOSCOPE   left = %s, right = %s' % (self.th.lname, self.th.rname), zoom is not None)
+        t(625, 28, 'VECTORSCOPE', zoom is not None)
         t(916, 28, 'LEVELS', zoom is not None)
-        self.spec_title = t(10, 28 if zoom == 'spec' else 336, 'SPECTRUM', hid('spec'))
-        self.hist_title = t(10 if zoom == 'hist' else 625, 28 if zoom == 'hist' else 336, 'LEVEL HISTORY', hid('hist'))
+        self.spec_title = t(10, 336, 'SPECTRUM', zoom is not None)
+        self.hist_title = t(625, 336, 'LEVEL HISTORY', zoom is not None)
         # oscilloscope
         x0, y0, x1, y1 = self.P['osc']
         self.osc_item = c.create_image(x0, y0, anchor='nw')  # the graph is a picture (see BeamPlot) with its grid baked in
@@ -2156,8 +2172,13 @@ class App:
         self.c.config(cursor='hand2' if (self.zoom or self.scope_hit(e.x, e.y)) else '')
 
     def zoom_panel(self, name):
-        """name fills the whole scope area; None shows all the panels again"""
+        """name fills the whole window, with nothing else in it (no buttons, no text); None shows the window as it was"""
         self.zoom = name
+        self.CW, self.CH, self.TH = self.canvas_size()
+        self.c.config(width=self.CW, height=self.CH)
+        self.layout_rows()
+        if name is None:
+            self.root.after(30, self.fit_window)  # the window is as tall as its content again
         self.c.delete('all')
         self.build_scope()
         self.hist_key = None
@@ -2243,6 +2264,23 @@ class App:
         tk.Label(f, text='   ', **lab).pack(side='left')
         mk('Find problems  (F)', self.find_problems_key)
 
+    def layout_rows(self):
+        """what the window shows: only the canvas while a scope fills it, else the canvas, the button rows and, when there is something for them, the compare and clip rows and the timeline"""
+        for w in (self.c, self.controls, self.transport, self.cmp_row, self.clip_row, self.tl):
+            w.pack_forget()
+        if self.zoom is not None:
+            self.c.pack(fill='both', expand=True)
+            return
+        self.c.pack()
+        self.controls.pack(fill='x')
+        self.transport.pack(fill='x')
+        if self._rows[1]:
+            self.cmp_row.pack(fill='x')
+        if self._rows[0]:
+            self.clip_row.pack(fill='x')
+        if self._rows[2]:
+            self.tl.pack()
+
     def refresh_rows(self):
         """the compare and clip rows and the timeline under them only show when there is something for them: the timeline from the moment a recording starts, a clip is opened or two are compared"""
         state = (self.mode in ('review', 'compare'), self.mode == 'compare', self.mode != 'live')
@@ -2250,21 +2288,14 @@ class App:
             return
         first = self._rows is None
         self._rows = state
-        for w in (self.cmp_row, self.clip_row, self.tl):
-            w.pack_forget()
-        if state[1]:
-            self.cmp_row.pack(fill='x')
-        if state[0]:
-            self.clip_row.pack(fill='x')
-        if state[2]:
-            self.tl.pack()
-        if not first:
+        self.layout_rows()
+        if not first and self.zoom is None:
             self.root.after(30, self.fit_window)  # the window grows or shrinks with them
 
     def fit_window(self):
         """make the window as tall as its content now is"""
         try:
-            if self.root.state() != 'normal':
+            if self.root.state() != 'normal' or self.zoom is not None:
                 return
             self.root.update_idletasks()
             w = self.root.winfo_width()  # the width stays what it is (the scope's own width before the window is on screen): a long message in a row must not widen the window
@@ -2420,6 +2451,10 @@ class App:
         self._rz = None
         w, h = self.root.winfo_width(), self.root.winfo_height()
         if w < 300 or h < 200:
+            return
+        if self.zoom is not None:  # a scope fills the window: it follows the window's size (the scale stays)
+            if (w, h) != (self.CW, self.CH):
+                self.zoom_panel(self.zoom)
             return
         k = self.fit_k(w, h)
         if abs(k - self.k) >= 0.05:
@@ -3559,7 +3594,7 @@ class App:
             a[by - self.S(7):by + self.S(7) + 1, cx] = g
             pl = BeamPlot(a, th.bg, colors, 0.05, 1.3, 1.0, 64, glow)
         else:  # a level history has to keep its dips visible, so a fast stroke is not dimmed (power 0)
-            pl = BeamPlot(plot_base(w, h, th.bg, th.grid, th.peak, rows), th.bg, colors, 0.05, 0.32, 0.0, 200, glow, 'max')  # where the two channels overlap each keeps its colour instead of burning out to white
+            pl = BeamPlot(plot_base(w, h, th.bg, th.grid, th.peak, rows), th.bg, colors, 0.05, 0.32, 0.0, 200, glow, 'white')  # each channel keeps its colour; where they overlap the line turns white, without the thick burnt band that adding their light made
         wk = self.plots[name] = BeamWorker(pl, self.THREADED)
         return wk
 

@@ -207,6 +207,14 @@ for name in ('osc', 'vec', 'spec', 'hist'):
     app.scope_click(Ev0(x=app.S(300), y=app.S(300)))
     pump(root, 0.3)
     check('clicking again shows all the panels again (%s)' % name, app.zoom is None and app.P == normal_P and app.panel_frame == normal_frame, (app.zoom,))
+rows_ = lambda: [w_.winfo_manager() for w_ in (app.controls, app.transport)]
+before_ = rows_()
+app.scope_click(Ev0(x=mid('osc')[0], y=mid('osc')[1]))
+titles_ = [i for i in app.c.find_all() if app.c.type(i) == 'text' and app.c.itemcget(i, 'text').split(' ')[0] in ('OSCILLOSCOPE', 'VECTORSCOPE', 'LEVELS', 'SPECTRUM', 'LEVEL')]
+check('a scope fills the window alone: the button rows are out of sight, the canvas is all that is packed, and no title or status text is in view',
+      rows_() == ['', ''] and app.c.winfo_manager() == 'pack' and len(titles_) >= 4 and all(app.c.coords(i)[0] >= app.CW for i in titles_) and app.c.coords(app.status)[0] >= app.CW, (rows_(), [app.c.coords(i) for i in titles_], app.CW))
+app.scope_click(Ev0(x=app.S(300), y=app.S(300)))
+check('and double-clicking again brings the button rows back, in their places', rows_() == before_ == ['pack', 'pack'] and app.c.winfo_manager() == 'pack', (rows_(), before_))
 app.scope_click(Ev0(x=(normal_P['met'][0] + normal_P['met'][2]) // 2, y=(normal_P['met'][1] + normal_P['met'][3]) // 2))
 check('the levels panel is not enlarged by a click', app.zoom is None)
 no_error('after zooming')
@@ -608,7 +616,7 @@ for _ in m.THEMES:
 check('cycling through every theme comes back to the first', app.th.name == first)
 app.cycle_theme()
 pump(root, 0.6)
-check('a theme with glow draws its graphs with a halo: the oscilloscope, spectrum and history screens are phosphor pictures at full glow', app.th.glow and all(app.plots[n_].plot.glow == 1.0 for n_ in ('osc', 'spec', 'hist')) and app.plots['hist'].plot.blend == 'max' and all(app.photos.get(n_) is not None for n_ in ('osc', 'spec', 'hist')), (app.th.name, sorted(app.plots), sorted(app.photos)))
+check('a theme with glow draws its graphs with a halo: the oscilloscope, spectrum and history screens are phosphor pictures at full glow', app.th.glow and all(app.plots[n_].plot.glow == 1.0 for n_ in ('osc', 'spec', 'hist')) and app.plots['hist'].plot.blend == 'white' and all(app.photos.get(n_) is not None for n_ in ('osc', 'spec', 'hist')), (app.th.name, sorted(app.plots), sorted(app.photos)))
 check('changing the theme prints no message (the change is obvious)', 'theme' not in app.lbl_msg.cget('text').lower(), app.lbl_msg.cget('text'))
 app.set_spec_mode('spectrogram')
 pump(root, 1.0)
