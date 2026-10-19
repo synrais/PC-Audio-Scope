@@ -601,9 +601,17 @@ try:
     check('first run, enlarged: no grid anywhere; clean (no info) for the oscilloscope, vectorscope and levels; the spectrum and the level history keep their info',
           full_ == {'osc': (False, False), 'vec': (False, False), 'met': (False, False), 'spec': (False, True), 'hist': (False, True)}, full_)
     burn_ = {n_: m.App.panel_burn_level(stub_, n_) for n_ in m.PANELS}
-    check('first run: the oscilloscope, spectrum and history start on Narrow burn 0.4, the vectorscope and levels on 1.0; every beam window starts on Line strength 6',
-          burn_ == {'osc': 0.4, 'vec': 1.0, 'met': 1.0 if th_sh.glow else 0.4, 'spec': 0.4, 'hist': 0.4} and all(m.App.panel_crt(stub_, n_) for n_ in m.PANELS)
-          and all(m.App.panel_strength(stub_, n_) == 6 for n_ in ('osc', 'vec', 'spec', 'hist')) and m.App.panel_strength(stub_, 'met') == 1, burn_)
+    wide_ = {n_: m.App.panel_wide_level(stub_, n_) for n_ in m.PANELS}
+    check('first run: Narrow burn 0.6 for the oscilloscope and vectorscope, 0.4 for the spectrum and history, 1.0 for the levels; Wide burn 0.6, 0.3, 0.3, 0.2 and 0.3 (oscilloscope, vectorscope, spectrum, history, levels); every beam window starts on Line strength 6',
+          burn_ == {'osc': 0.6, 'vec': 0.6, 'met': 1.0, 'spec': 0.4, 'hist': 0.4} and wide_ == {'osc': 0.6, 'vec': 0.3, 'met': 0.3, 'spec': 0.3, 'hist': 0.2} and all(m.App.panel_crt(stub_, n_) for n_ in m.PANELS)
+          and all(m.App.panel_strength(stub_, n_) == 6 for n_ in ('osc', 'vec', 'spec', 'hist')) and m.App.panel_strength(stub_, 'met') == 1, (burn_, wide_))
+    classic_ = [t_ for t_ in m.THEMES if t_.name == 'Classic'][0]
+    stub_.th = classic_
+    cb_, cw_ = {n_: m.App.panel_burn_level(stub_, n_) for n_ in m.PANELS}, {n_: m.App.panel_wide_level(stub_, n_) for n_ in m.PANELS}
+    check('the Classic theme keeps its crisp look: only the vectorscope burns (1.0), the rest 0.4, and nothing is wide', cb_ == {'osc': 0.4, 'vec': 1.0, 'met': 0.4, 'spec': 0.4, 'hist': 0.4} and all(v_ == 0.0 for v_ in cw_.values()), (cb_, cw_))
+    stub_.th = th_sh
+    stub_.panel_opts = {'osc': {'burn': 1.5, 'wide': 0.0}}
+    check('Narrow burn and Wide burn chosen in a menu win over the starting ones (a Wide burn of 0 is a choice too)', m.App.panel_burn_level(stub_, 'osc') == 1.5 and m.App.panel_wide_level(stub_, 'osc') == 0.0 and m.App.panel_wide_level(stub_, 'vec') == 0.3, stub_.panel_opts)
     stub_.panel_opts = {'spec': {'grid': True}, 'osc': {'fs_info': True, 'fs_grid': True}}
     stub_.zoom = 'osc'
     check('a choice made in a window\'s menu wins over the starting one', m.App.panel_grid(stub_, 'spec') is True and m.App.panel_grid(stub_, 'osc') is True and m.App.panel_info(stub_, 'osc') is True and m.App.panel_info(stub_, 'hist') is True, stub_.panel_opts)

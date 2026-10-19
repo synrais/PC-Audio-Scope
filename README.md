@@ -12,7 +12,7 @@ findings, and talk about the same moment.
 
 It started as a way to check that two builds of the same game sound the same.
 
-![review](docs/review.png)
+![PC Audio Scope playing music: oscilloscope, vectorscope, levels, spectrum and level history](docs/live.png)
 
 ## Download
 
@@ -38,7 +38,7 @@ the window appears.
 - double-click the oscilloscope, vectorscope, levels, spectrum or level history and it fills the whole window with nothing else on it (no buttons, no text; the keys still work), double-click again to get everything back
 - right-click a window (oscilloscope, vectorscope, levels, spectrum, level history): turn its grid on or off, its info (all its numbers and text) on or off (the full screen window has its own two, so the normal layout can keep its grid and info while the full screens are clean; the border of a window only goes in full screen), **Narrow burn**, **Wide burn** and **Line strength** (rows with an arrow either side: click the arrows, hold one to run, scroll over the row, or use Left / Right, Home and End while the menu is open - it stays open so you can watch the graph change); the spectrogram has just Info, and pick its own left and right colours (the vectorscope has one); the choices are remembered
 - **Narrow burn** is the glow of the phosphor beam close to the line (two glows, about 5 and 23 pixels wide at 1080 high), from **0** (all the phosphor effects off: clean lines) up to **3.0** in steps of 0.1. The oscilloscope, spectrum and level history start on 0.4, the vectorscope and levels on 1.0 (the Classic theme keeps its own look: only the vectorscope on 1.0). Above 1.0 the brightest areas burn to white sooner and close lines blend into one glow. **Wide burn** adds a third glow that is very broad and faint (about 78 pixels at 1080 high, like light scattered in the glass of a monitor): a soft haze round bright things that fills the dark between them. It is 0 (off) until you raise it, up to 3.0 in steps of 0.1, and it works on its own: it does not depend on Narrow burn, but is gone with it at 0 (clean lines). **Line strength** (with Narrow burn above 0, not for the level bars) is **1 to 10**: 1 is the beam's brightness as it is, higher raises its weak end so faint and fast strokes look solid instead of see-through (6 is where every window starts). Only the line itself is brightened - the glows, the colours and the level bars are as they were.
-- what a first run starts with (anything you choose in a menu is remembered and wins): the **Orange + blue** theme; the enlarged windows have no grid, and no info either - except the spectrum and the level history, which keep their info (the spectrum's range names, the history's dB numbers); the spectrum has no grid in the normal layout either; everything else on
+- what a first run starts with (anything you choose in a menu is remembered and wins): the **Orange + blue** theme; the enlarged windows have no grid, and no info either - except the spectrum and the level history, which keep their info (the spectrum's range names, the history's dB numbers); the spectrum has no grid in the normal layout either; everything else on. Narrow burn starts at 0.6 for the oscilloscope and vectorscope, 0.4 for the spectrum and level history and 1.0 for the levels, and Wide burn at 0.6, 0.3, 0.3, 0.2 and 0.3 (oscilloscope, vectorscope, spectrum, history, levels); the Classic theme keeps its crisp look (only the vectorscope burns, nothing wide)
 - input: the Windows default output (follows it when you change device), any other output, or any microphone
 - a dark title bar in the colours of the theme (Windows 10 and 11), and the program's own icon on the window and the taskbar
 
@@ -49,6 +49,8 @@ the window appears.
 - timeline (collapsed until you record, open a clip or compare; the window grows to fit it): click or drag to seek, wheel to zoom, right-drag to pan, double-click for the whole clip
 - markers (`M`), an A-B selection (`I`, `O` or shift-drag) with its own loudness figures, loop (`P`), export of the selection (`E`)
 - markers, selection and the Windows volume a clip was recorded at are kept in a small `.json` next to the `.wav`
+
+![review](docs/review.png)
 
 **Compare two clips**
 - both clips sit on a shared timeline, each with its own start position: drag a lane, type a start, nudge it (Alt+arrows),
@@ -187,7 +189,7 @@ On a Mac you open the app the first time with right-click, Open (it is unsigned)
 | `tests/` | `python tests/run.py` runs everything in about a minute, in a hidden window with a synthetic input; nothing is played |
 | `packaging/` | the PyInstaller recipe and the icon |
 | `releases/` | the ready-made programs |
-| `docs/` | the pictures above, made by `python tests/screenshots.py` from synthetic data (the analysis picture comes from a demo piece with a fault in each channel) |
+| `docs/` | the pictures above: `live.png` is a real capture of the program playing music, the others are made by `python tests/screenshots.py` from synthetic data (the analysis picture comes from a demo piece with a fault in each channel) |
 | `recordings/` | your clips (created on first use, not part of the repository) |
 
 ## Limits

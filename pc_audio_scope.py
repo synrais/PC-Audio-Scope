@@ -823,8 +823,10 @@ PANEL_TITLES = {'osc': 'Oscilloscope', 'vec': 'Vectorscope', 'met': 'Levels', 's
 DEFAULT_THEME = 'Orange + blue'  # the theme a first run starts with
 # what a window starts with before anything is chosen in its menu (anything not listed is on): the enlarged windows have no grid, and no info except the spectrum and the level history; the spectrum has no grid
 # in the normal layout either
-PANEL_DEFAULTS = {'osc': {'fs_grid': False, 'fs_info': False}, 'vec': {'fs_grid': False, 'fs_info': False}, 'met': {'fs_grid': False, 'fs_info': False},
-                  'hist': {'fs_grid': False}, 'spec': {'grid': False, 'fs_grid': False}}
+# 'burn' (Narrow burn) and 'wide' (Wide burn) too, for a theme with glow (the Classic theme keeps its crisp look: only the vectorscope burns, nothing wide)
+PANEL_DEFAULTS = {'osc': {'fs_grid': False, 'fs_info': False, 'burn': 0.6, 'wide': 0.6}, 'vec': {'fs_grid': False, 'fs_info': False, 'burn': 0.6, 'wide': 0.3},
+                  'met': {'fs_grid': False, 'fs_info': False, 'burn': 1.0, 'wide': 0.3}, 'hist': {'fs_grid': False, 'burn': 0.4, 'wide': 0.2},
+                  'spec': {'grid': False, 'fs_grid': False, 'burn': 0.4, 'wide': 0.3}}
 HEX_COLOUR = re.compile(r'^#[0-9a-fA-F]{6}$')
 
 
@@ -2814,8 +2816,11 @@ class App:
         return self.panel_opts.get(name, {}).get(key, PANEL_DEFAULTS.get(name, {}).get(key, True))
 
     def panel_wide_level(self, name):
-        """Wide burn: the broad, faint glow of a window's beam, 0 (none, the start) to 3 in steps of 0.1"""
-        return self.panel_opts.get(name, {}).get('wide', 0.0)
+        """Wide burn: the broad, faint glow of a window's beam, 0 (none) to 3 in steps of 0.1: chosen for the window, else the start (PANEL_DEFAULTS; none with the Classic theme)"""
+        o = self.panel_opts.get(name, {})
+        if 'wide' in o:
+            return o['wide']
+        return PANEL_DEFAULTS.get(name, {}).get('wide', 0.0) if self.th.glow else 0.0
 
     def wide_gain(self, name):
         return WIDE_GAIN * self.panel_wide_level(name)
@@ -2831,12 +2836,13 @@ class App:
                 sc.wide = self.wide_gain(name)
 
     def panel_burn_level(self, name):
-        """Narrow burn: the glow of a window's phosphor beam, 0 (clean lines) to 3 in steps of 0.1: chosen for the window, else the start: 1.0 for the vectorscope and the levels (the Classic theme: the
-        vectorscope only), 0.4 for the rest (a crisp, light glow)"""
+        """Narrow burn: the glow of a window's phosphor beam, 0 (clean lines) to 3 in steps of 0.1: chosen for the window, else the start (PANEL_DEFAULTS; the Classic theme: 1.0 for the
+        vectorscope only, 0.4 for the rest, a crisp, light glow)"""
         o = self.panel_opts.get(name, {})
         if 'burn' in o:
             return o['burn']
-        return BURN_HIGH if name in (('vec', 'met') if self.th.glow else ('vec',)) else BURN_LOW
+        old = BURN_HIGH if name in (('vec', 'met') if self.th.glow else ('vec',)) else BURN_LOW
+        return PANEL_DEFAULTS.get(name, {}).get('burn', old) if self.th.glow else old
 
     def panel_crt(self, name):
         """the CRT look (a phosphor beam with persistence, glow and white-hot lines), unless Narrow burn is 0: clean lines"""
