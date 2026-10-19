@@ -818,6 +818,34 @@ FLAT_BUTTONS = MACOS  # macOS draws tk.Button in the system colours, so buttons 
 FROZEN = bool(getattr(sys, 'frozen', False))  # running as a packaged program
 
 
+PANELS = ('osc', 'vec', 'met', 'spec', 'hist')
+PANEL_TITLES = {'osc': 'Oscilloscope', 'vec': 'Vectorscope', 'met': 'Levels', 'spec': 'Spectrum', 'hist': 'Level history'}
+HEX_COLOUR = re.compile(r'^#[0-9a-fA-F]{6}$')
+
+
+def clean_panel_opts(d):
+    """the choices made for each window (right-click it), as read from the settings file: anything unknown or invalid is left out.  Per window: 'grid', 'info' (its numbers and text), 'crt'
+    (the phosphor effects: off = clean lines) and 'overburn' (the high light level; True/False each), 'left' and 'right' (a colour each; the vectorscope has just 'color').  'glow' was the first
+    name of 'overburn', 'classic' the one before it (the other way round)"""
+    out = {}
+    if not isinstance(d, dict):
+        return out
+    for name, o in d.items():
+        if name not in PANELS or not isinstance(o, dict):
+            continue
+        keep = {k: o[k] for k in ('grid', 'info', 'crt', 'overburn') if isinstance(o.get(k), bool)}
+        if 'overburn' not in keep and isinstance(o.get('glow'), bool):
+            keep['overburn'] = o['glow']
+        if 'overburn' not in keep and isinstance(o.get('classic'), bool):
+            keep['overburn'] = not o['classic']
+        for k in (('color',) if name == 'vec' else ('left', 'right')):
+            if isinstance(o.get(k), str) and HEX_COLOUR.match(o[k]):
+                keep[k] = o[k].lower()
+        if keep:
+            out[name] = keep
+    return out
+
+
 def double_click_time():
     """how quickly (seconds) the second click of a double click has to follow the first: the system's setting on Windows, else half a second"""
     try:
@@ -1026,8 +1054,11 @@ class BeamPlot:
     drawn smaller and enlarged, which keeps a big graph fast"""
     MAX_W = 700
 
-    def __init__(self, base, bg, colors, tau, exposure, power=1.0, max_bits=64, glow=1.0, blend='add'):
+    clean = False
+
+    def __init__(self, base, bg, colors, tau, exposure, power=1.0, max_bits=64, glow=1.0, blend='add', flat=False):
         self.h, self.w = base.shape[:2]
+        self.flat, self.bg_rgb, self.rgb_colors = flat, rgbtuple(bg), [rgbtuple(c) for c in colors]  # flat: no phosphor, the bars as plain areas (the levels, with the CRT look off)
         self.f = min(1.0, self.MAX_W / float(self.w))
         rw, rh = max(8, int(round(self.w * self.f))), max(8, int(round(self.h * self.f)))
         self.screens = [BeamScreen(rw, rh, tau, exposure) for _ in range(2)]
@@ -1045,6 +1076,17 @@ class BeamPlot:
 
     def image(self):
         from PIL import ImageChops
+        if self.flat:  # plain areas: the fill in a darker shade, the bright edges and the hold line in the colour, no glow
+            out = np.array(self.base)
+            for sc, col in zip(self.screens, self.rgb_colors):
+                a = sc.buf
+                if self.f != 1.0:
+                    a = np.asarray(Image.fromarray(a).resize((self.w, self.h), Image.Resampling.NEAREST))
+                col, bgc = np.array(col, np.float64), np.array(self.bg_rgb, np.float64)
+                out[a > 0.05] = (bgc * 0.45 + col * 0.55).astype(np.uint8)
+                out[a > 2.0] = col.astype(np.uint8)
+                out[a > 8.0] = (col + (255.0 - col) * 0.55).astype(np.uint8)
+            return Image.fromarray(out, 'RGB')
         ims = [sc.render(lut, self.glow) for sc, lut in zip(self.screens, self.luts)]
         if self.blend == 'max':
             light = ImageChops.lighter(ims[0], ims[1])
@@ -1061,14 +1103,88 @@ class BeamPlot:
 
 class BeamVector:
     """the vectorscope's screen with its palette: the new samples go in, a picture `side` pixels wide comes out"""
+    clean = False
 
-    def __init__(self, size, side, lut):
+    def __init__(self, size, side, lut, glow=1.0):
         self.screen = BeamScreen(size)
-        self.side, self.lut = side, lut
+        self.side, self.lut, self.glow = side, lut, glow
 
     def image(self):
-        img = self.screen.render(self.lut)
+        img = self.screen.render(self.lut, self.glow)
         return img if img.size[0] == self.side else img.resize((self.side, self.side), Image.Resampling.BILINEAR)
+
+
+class CleanScreen:
+    """what the vectorscope of CleanVector is fed: the newest samples (the line is only what has just been played, nothing lingers)"""
+
+    def __init__(self, size):
+        self.size = int(size)
+        self.u = self.v = None
+
+    def clear(self):
+        self.u = self.v = None
+
+    def add(self, u, v, dt):
+        if len(u) > 1:
+            self.u, self.v = np.asarray(u, np.float64), np.asarray(v, np.float64)
+
+
+class CleanVector:
+    """the vectorscope as a clean line: the path of the newest samples in one colour on the background, smooth edges, no phosphor"""
+    clean = True
+
+    def __init__(self, size, side, color, bg, glow=1.0):
+        self.screen = CleanScreen(size)
+        self.side, self.glow = side, glow
+        self.color, self.bg = rgbtuple(color), rgbtuple(bg)
+
+    def image(self):
+        from PIL import ImageDraw
+        n, k = self.screen.size, 3
+        layer = Image.new('RGB', (n * k, n * k), self.bg)
+        u, v = self.screen.u, self.screen.v
+        if u is not None:
+            h = (n * k - 1) / 2.0
+            ImageDraw.Draw(layer).line(list(zip(h * (1.0 + 0.96 * u), h * (1.0 - 0.96 * v))), fill=self.color, width=max(2, int(round(1.3 * k))), joint='curve')
+        img = layer.resize((n, n), Image.Resampling.LANCZOS)  # drawn three times as big and shrunk: smooth edges
+        return img if n == self.side else img.resize((self.side, self.side), Image.Resampling.BILINEAR)
+
+
+class CleanPlot:
+    """a graph drawn as clean lines: the same calls as BeamPlot, but only the newest line of each channel in its colour over the background picture, smooth edges, and nothing else (no phosphor,
+    no persistence, no glow, no white-hot)"""
+    clean = True
+    f = 1.0
+    glow = None
+    blend = None
+
+    def __init__(self, base, bg, colors, width=1.6):
+        self.h, self.w = base.shape[:2]
+        self.base = Image.fromarray(base, 'RGB')
+        self.colors = [rgbtuple(c) for c in colors]
+        self.width = width
+        self.lines = [[], []]
+
+    def clear(self):
+        self.lines = [[], []]
+
+    def add(self, ch, xs, ys, dt):
+        if ch == 0 and dt > 0:  # the first line of a new frame: what was drawn before is gone
+            self.clear()
+        self.lines[ch].append((np.asarray(xs, np.float64), np.asarray(ys, np.float64)))
+
+    def image(self):
+        from PIL import ImageDraw
+        k = 3
+        layer = Image.new('RGBA', (self.w * k, self.h * k), (0, 0, 0, 0))
+        d = ImageDraw.Draw(layer)
+        for ch in (0, 1):
+            for xs, ys in self.lines[ch]:
+                if len(xs) > 1:
+                    d.line(list(zip(xs * k, ys * k)), fill=self.colors[ch] + (255,), width=max(2, int(round(self.width * k))), joint='curve')
+        out = self.base.convert('RGBA')
+        out.alpha_composite(layer.resize((self.w, self.h), Image.Resampling.BOX))
+        return out.convert('RGB')
 
 
 class BeamWorker:
@@ -1867,6 +1983,7 @@ class App:
         self.gain = 1.0  # the scope's gain follows the sound by itself
         self.comp = False  # levels are shown as measured; the C key ignores the Windows volume until the program is closed
         self.spec_mode = s.get('spec_mode', 'spectrum')
+        self.panel_opts = clean_panel_opts(s.get('panels'))  # what was chosen for each window with a right click
         self.hold = [FLOOR, FLOOR]
         self.hold_t = [0.0, 0.0]
         self.bal_lv = [FLOOR, FLOOR]  # the levels the balance bars show (dB)
@@ -1898,6 +2015,8 @@ class App:
         self.findings_on = False  # the findings list replaces the level history
         self.zoom = None  # the scope panel that fills the whole scope area (double-click a scope), or None
         self.click_last = None  # (time, x, y) of a first click that waits for its second
+        self.mz = 1.0  # how much bigger than usual the levels are drawn (when they fill the window)
+        self.pos_clock = None  # see smooth_pos
         self.dbl_time = double_click_time()
         self.dc_now = [0.0, 0.0]
         self.last_dir = s.get('last_dir') or REC_DIR
@@ -1933,7 +2052,6 @@ class App:
         self.style_titlebar()
         root.after(300, self.style_titlebar)  # again once the window is on screen
         self.tick()
-        self.history_loop()
 
     # --- settings ---
     def load_settings(self):
@@ -1947,7 +2065,7 @@ class App:
             os.makedirs(os.path.dirname(SETTINGS), exist_ok=True)
             self.root.update_idletasks()
             json.dump({'w': self.root.winfo_width(), 'h': self.root.winfo_height(), 'x': self.root.winfo_x(), 'y': self.root.winfo_y(), 'k': self.k,
-                       'spec_mode': self.spec_mode, 'theme': self.th.name, 'loop': self.player.loop, 'last_dir': self.last_dir, 'source': list(self.cap.want)}, open(SETTINGS, 'w'))
+                       'spec_mode': self.spec_mode, 'theme': self.th.name, 'loop': self.player.loop, 'last_dir': self.last_dir, 'source': list(self.cap.want), 'panels': self.panel_opts}, open(SETTINGS, 'w'))
         except Exception:
             pass
 
@@ -1997,6 +2115,10 @@ class App:
     def S(self, v):
         return int(round(v * self.k))
 
+    def ms(self, v):
+        """a length in the levels panel (in the units of the normal layout): S(v), times how much bigger the levels are drawn when they fill the window (self.mz)"""
+        return int(round(v * self.k * self.mz))
+
     def F(self, size, fam='Consolas', bold=False):
         return (FONTS.get(fam, fam), max(6, int(round(size * self.k)))) + (('bold',) if bold else ())
 
@@ -2018,6 +2140,10 @@ class App:
         self.c.pack()
         self.c.bind('<Button-1>', self.scope_press)  # a single click does nothing: it takes a double click (counted here, see scope_press) to enlarge a scope or to go back
         self.c.bind('<Motion>', self.scope_motion)
+        self.c.bind('<Button-3>', self.panel_menu)  # a right click on a window: its grid, its light levels, its colours
+        if MACOS:
+            self.c.bind('<Button-2>', self.panel_menu)
+            self.c.bind('<Control-Button-1>', self.panel_menu)
         self.build_scope()
         self.build_controls()
         self.build_transport()
@@ -2040,7 +2166,12 @@ class App:
         zoom = self.zoom
         m_, CW, CH = S(8), self.CW, self.CH  # a zoomed panel fills the canvas (the whole window) with a small margin; the vectorscope stays square; the spectrum leaves room for its range names
         side = min(CW, CH) - 2 * m_
-        zoomed = dict(osc=(m_, m_, CW - m_, CH - m_), vec=((CW - side) // 2, (CH - side) // 2, (CW - side) // 2 + side, (CH - side) // 2 + side), spec=(m_, m_, CW - m_, CH - m_ - S(32)), hist=(m_, m_, CW - m_, CH - m_))
+        self.mz = 1.0
+        if zoom == 'met':  # the levels keep their shape: drawn bigger, in the middle of the window
+            self.mz = max(0.5, min((CW - 2 * m_) / (314.0 * self.k), (CH - 2 * m_) / (276.0 * self.k)))
+        mwid, mhei = int(round(314 * self.k * self.mz)), int(round(276 * self.k * self.mz))
+        zoomed = dict(osc=(m_, m_, CW - m_, CH - m_), vec=((CW - side) // 2, (CH - side) // 2, (CW - side) // 2 + side, (CH - side) // 2 + side), spec=(m_, m_, CW - m_, CH - m_ - S(32)), hist=(m_, m_, CW - m_, CH - m_),
+                      met=((CW - mwid) // 2, (CH - mhei) // 2, (CW - mwid) // 2 + mwid, (CH - mhei) // 2 + mhei))
         away = self.CW + S(100)  # panels that are not shown are built this far to the right, out of sight
         hid = lambda n: zoom is not None and n != zoom
         self.P = {}
@@ -2060,88 +2191,99 @@ class App:
         def t(x, y, s, out=False, **k):
             return c.create_text(S(x) + (away if out else 0), S(y), text=s, fill=k.pop('fill', self.TXT), font=self.F(k.pop('size', 9)), anchor=k.pop('anchor', 'nw'), **k)
         self.status = t(10, 8, '', zoom is not None, size=10)
-        self.dc_txt = t(985, 28, '', zoom is not None)
-        t(10, 28, 'OSCILLOSCOPE   left = %s, right = %s' % (self.th.lname, self.th.rname), zoom is not None)
-        t(625, 28, 'VECTORSCOPE', zoom is not None)
-        t(916, 28, 'LEVELS', zoom is not None)
-        self.spec_title = t(10, 336, 'SPECTRUM', zoom is not None)
-        self.hist_title = t(625, 336, 'LEVEL HISTORY', zoom is not None)
+        shown = lambda n: 'normal' if self.panel_info(n) else 'hidden'  # a window's text and numbers can be turned off (right-click it)
+        self.dc_txt = t(985, 28, '', zoom is not None, state=shown('met'))
+        t(10, 28, 'OSCILLOSCOPE', zoom is not None, state=shown('osc'))  # no list of the channel colours: every window can have its own
+        t(625, 28, 'VECTORSCOPE', zoom is not None, state=shown('vec'))
+        t(916, 28, 'LEVELS', zoom is not None, state=shown('met'))
+        self.spec_title = t(10, 336, 'SPECTRUM', zoom is not None, state=shown('spec'))
+        self.hist_title = t(625, 336, 'LEVEL HISTORY', zoom is not None, state=shown('hist'))
         # oscilloscope
         x0, y0, x1, y1 = self.P['osc']
         self.osc_item = c.create_image(x0, y0, anchor='nw')  # the graph is a picture (see BeamPlot) with its grid baked in
         # vectorscope: the beam is a picture (see BeamScreen) under the graticule
         x0, y0, x1, y1 = self.P['vec']
         self.vec_item = c.create_image(x0 + 1, y0 + 1, anchor='nw')
-        self.vec_lut = beam_palette(self.BG, self.th.vec)
+        self.vec_lut = beam_palette(self.BG, self.panel_vec_color())
         cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
-        c.create_line(x0, cy, x1, cy, fill=self.GRID)
-        c.create_line(cx, y0, cx, y1, fill=self.GRID)
-        c.create_line(x0, y1, x1, y0, fill=self.th.dash, dash=(3, 4))
-        c.create_text(x1 - S(4), cy + S(3), text='L', fill=self.CL, font=self.F(9), anchor='ne')
-        c.create_text(cx + S(4), y0 + S(3), text='R', fill=self.CR, font=self.F(9), anchor='nw')
-        # meters (absolute positions; out of sight while a scope fills the area)
+        if self.panel_grid('vec'):
+            c.create_line(x0, cy, x1, cy, fill=self.GRID, tags='vgrid')
+            c.create_line(cx, y0, cx, y1, fill=self.GRID, tags='vgrid')
+            c.create_line(x0, y1, x1, y0, fill=self.th.dash, dash=(3, 4), tags='vgrid')
+        if self.panel_info('vec'):
+            c.create_text(x1 - S(4), cy + S(3), text='L', fill=self.CL, font=self.F(9), anchor='ne')
+            c.create_text(cx + S(4), y0 + S(3), text='R', fill=self.CR, font=self.F(9), anchor='nw')
+        # meters: positions are in the units of the normal layout; out of sight while another scope fills the area, and bigger (self.mz) when they fill the window themselves
         x0, y0, x1, y1 = self.P['met']
-        mx = away if zoom is not None else 0
-        self.bal_x = S(1073) + mx
-        self.bar_h = S(90)
-        self.bar_top = y0 + S(20)
-        self.bar_xs = (S(993) + mx, S(1103) + mx)  # the two level bars are centred on the balance bar (S(1073)), with the dB scale between them
+        mx = away if (zoom is not None and zoom != 'met') else 0
+        ms = self.ms
+        MX = (lambda bx: x0 + ms(bx - 916)) if zoom == 'met' else (lambda bx: S(bx) + mx)  # (916 is where the panel starts in the normal layout)
+        FM = lambda size, *a_, **k_: self.F(size * self.mz, *a_, **k_)
+        info = self.panel_info('met')
+        self.bal_x = MX(1073)
+        self.bar_h = ms(90)
+        self.bar_top = y0 + ms(20)
+        self.bar_xs = (MX(993), MX(1103))  # the two level bars are centred on the balance bar (1073), with the dB scale between them
         self.met_item = c.create_image(x0 + 1, y0 + 1, anchor='nw')  # the bars are a picture (see beam_plot): glowing, like the graphs
         self.met_geom = None
-        nfont = tkfont.Font(root=self.root, font=self.F(8))
+        nfont = tkfont.Font(root=self.root, font=FM(8))
         wm, w2 = nfont.measure('-'), nfont.measure('48')
         col_x = self.bal_x - (wm + w2) / 2.0 + wm  # the first digit of every number of the dB scale starts here (the 0, the 6 of -6, the 1 of -12 ...), the minus signs hang to its left
         GAP_SHIFT = {-12: 2, -24: 3, -48: 2}  # pixels at scale 1: measured on the drawn digits (the 1, 2 and 4 have different side gaps)
         for dd in (0, -6, -12, -24, -48):  # each number sits on its line, which runs out to the bars on both sides of it
-            yy = y0 + S(20) + (-dd) / 60.0 * self.bar_h
+            yy = y0 + ms(20) + (-dd) / 60.0 * self.bar_h
             col = self.th.peak if dd == 0 else self.GRID
             digits = str(abs(dd))
-            lx = col_x - S(GAP_SHIFT.get(dd, 0))  # the two-digit numbers sit a hair to the left, so the gap between their two digits is on the balance bar's centre line
-            c.create_line(self.bar_xs[0] + S(54), yy, lx - S(3) - (wm if dd < 0 else 0), yy, fill=col)  # the 0 has no minus sign, so its line runs on to the digit
-            c.create_line(lx + nfont.measure(digits) + S(3), yy, self.bar_xs[1] - S(4), yy, fill=col)
-            c.create_text(lx, yy, text=digits, fill=(self.th.peak if dd == 0 else self.TXT), font=self.F(8), anchor='w')
-            if dd < 0:
-                c.create_text(lx, yy, text='-', fill=self.TXT, font=self.F(8), anchor='e')
+            lx = col_x - ms(GAP_SHIFT.get(dd, 0))  # the two-digit numbers sit a hair to the left, so the gap between their two digits is on the balance bar's centre line
+            if self.panel_grid('met'):
+                c.create_line(self.bar_xs[0] + ms(54), yy, lx - ms(3) - (wm if dd < 0 else 0), yy, fill=col)  # the 0 has no minus sign, so its line runs on to the digit
+                c.create_line(lx + nfont.measure(digits) + ms(3), yy, self.bar_xs[1] - ms(4), yy, fill=col)
+            if info:
+                c.create_text(lx, yy, text=digits, fill=(self.th.peak if dd == 0 else self.TXT), font=FM(8), anchor='w')
+                if dd < 0:
+                    c.create_text(lx, yy, text='-', fill=self.TXT, font=FM(8), anchor='e')
         # the text is one block at the bottom of the panel, the balance figure its last line; the balance bar hangs on the level of the vectorscope's centre line, between the level bars and the text
-        lh = tkfont.Font(root=self.root, font=self.F(9)).metrics('linespace')
-        txt_top = y1 - S(8) - 5 * lh - S(4)
-        self.m_txt = c.create_text(S(924) + mx, txt_top, text='', fill=self.TXT, font=self.F(9), anchor='nw')
+        lh = tkfont.Font(root=self.root, font=FM(9)).metrics('linespace')
+        txt_top = y1 - ms(8) - 5 * lh - ms(4)
+        self.m_txt = c.create_text(MX(924), txt_top, text='', fill=self.TXT, font=FM(9), anchor='nw', state=('normal' if info else 'hidden'))
         # the letters L and R of the figures are drawn apart, each in its channel's colour: character 16 and character 27 of every line (the font is monospaced, so they are in columns)
-        mfont = tkfont.Font(root=self.root, font=self.F(9))
-        c.create_text(S(924) + mx + mfont.measure(' ' * 16), txt_top, text=chr(10).join('LLLL'), fill=self.CL, font=self.F(9), anchor='nw')
-        c.create_text(S(924) + mx + mfont.measure(' ' * 27), txt_top, text=chr(10).join('RRRR'), fill=self.CR, font=self.F(9), anchor='nw')
+        mfont = tkfont.Font(root=self.root, font=FM(9))
+        if info:
+            c.create_text(MX(924) + mfont.measure(' ' * 16), txt_top, text=chr(10).join('LLLL'), fill=self.panel_colors('met')[0], font=FM(9), anchor='nw')
+            c.create_text(MX(924) + mfont.measure(' ' * 27), txt_top, text=chr(10).join('RRRR'), fill=self.panel_colors('met')[1], font=FM(9), anchor='nw')
         self.bal_y = int(round((y0 + y1) / 2.0))  # level of the vectorscope's centre line (it has the same top and bottom as this panel)
-        self.bal_lbl = c.create_text(S(924) + mx, txt_top + 4 * lh + S(4), text='', fill=self.TXT, font=self.F(9), anchor='nw')
+        self.bal_lbl = c.create_text(MX(924), txt_top + 4 * lh + ms(4), text='', fill=self.TXT, font=FM(9), anchor='nw', state=('normal' if info else 'hidden'))
         # spectrum (tag 'spec') and spectrogram (tag 'sg')
         x0, y0, x1, y1 = self.P['spec']
         sfont = tkfont.Font(root=self.root, font=self.F(8))
         for i, (lo, hi, names, rng) in enumerate(EQ_BANDS):  # the ranges an equaliser uses: tinted bands through the graph, their names under it
             a, b_ = self.fx(max(lo, 30)), self.fx(hi)
-            if lo > 30:  # the bands and their dividers inside the graph are in its picture; the dividers go on under it, between the names
+            if lo > 30 and self.panel_grid('spec'):  # the bands and their dividers inside the graph are in its picture; the dividers go on under it, between the names
                 c.create_line(a, y1, a, y1 + S(30), fill=self.GRID, tags='spec')
             name = next((n for n in names if sfont.measure(n) <= b_ - a - S(4)), names[-1])
-            c.create_text((a + b_) / 2, y1 + S(4), text=name, fill=self.th.fg, font=self.F(8), anchor='n', tags='spec')
-            c.create_text((a + b_) / 2, y1 + S(17), text=rng, fill=self.TXT, font=self.F(8), anchor='n', tags='spec')
-        for dd in DB_LINES:
+            if self.panel_info('spec'):
+                c.create_text((a + b_) / 2, y1 + S(4), text=name, fill=self.th.fg, font=self.F(8), anchor='n', tags='spec')
+                c.create_text((a + b_) / 2, y1 + S(17), text=rng, fill=self.TXT, font=self.F(8), anchor='n', tags='spec')
+        for dd in (DB_LINES if self.panel_info('spec') else ()):
             yy = y0 + (-dd) / DB_RANGE * (y1 - y0)
             c.create_text(x0 - S(5), yy + S(1) if dd == 0 else yy, text='%d dB' % dd, fill=(self.th.peak if dd == 0 else self.TXT), font=self.F(8), anchor='ne' if dd == 0 else 'e', tags='spec')
         self.spec_item = c.create_image(x0, y0, anchor='nw', tags='spec')
         self.sg_item = c.create_image(x0 + 1, y0 + 1, anchor='nw', tags='sg')
         self.sg_head = c.create_line(-10, y0, -10, y1, fill='white', tags='sg')
-        for f in (100, 1000, 10000):
+        for f in ((100, 1000, 10000) if self.panel_info('spec') else ()):
             yy = y0 + (1.0 - (math.log10(f) - math.log10(30)) / (math.log10(20000) - math.log10(30))) * (y1 - y0)
             c.create_text(x0 - S(5), yy, text='%g Hz' % f if f < 1000 else '%g kHz' % (f / 1000), fill=self.TXT, font=self.F(8), anchor='e', tags='sg')
         # history / compare report
         x0, y0, x1, y1 = self.P['hist']
-        for dd in DB_LINES:
+        for dd in (DB_LINES if self.panel_info('hist') else ()):
             yy = y0 + (-dd) / DB_RANGE * (y1 - y0)
             c.create_text(x0 - S(5), yy + S(1) if dd == 0 else yy, text='%d dB' % dd, fill=(self.th.peak if dd == 0 else self.TXT), font=self.F(8), anchor='ne' if dd == 0 else 'e', tags='hist')
         self.hist_item = c.create_image(x0, y0, anchor='nw', tags='hist')
         self.cmp_txt = c.create_text(self.panel_frame['hist'][0] + S(10), y0 + S(8), text='', fill=self.th.fg, font=self.F(10), anchor='nw', tags='cmp')
 
     def scope_hit(self, x, y):
-        """the scope panel under the mouse (the levels cannot be enlarged), or None"""
-        for n in ('osc', 'vec', 'spec', 'hist'):
+        """the panel under the mouse, or None"""
+        for n in PANELS:
             x0, y0, x1, y1 = self.panel_frame.get(n) or self.P[n]
             if n == 'spec':
                 y1 += self.S(32)  # the names of the equaliser ranges under the graph belong to it
@@ -2179,6 +2321,10 @@ class App:
         self.layout_rows()
         if name is None:
             self.root.after(30, self.fit_window)  # the window is as tall as its content again
+        self.refresh_panels()
+
+    def refresh_panels(self):
+        """the windows drawn again from scratch (a zoom, a resize, or a change to a window's grid, light levels or colours)"""
         self.c.delete('all')
         self.build_scope()
         self.hist_key = None
@@ -2186,6 +2332,115 @@ class App:
         self.stop_plots()
         self.set_spec_mode(self.spec_mode)
         self.draw()
+
+    # --- what a right click on a window offers ---
+    def panel_grid(self, name):
+        return self.panel_opts.get(name, {}).get('grid', True)
+
+    def panel_info(self, name):
+        """the numbers and text of a window (its title, scales, names): shown unless it was turned off"""
+        return self.panel_opts.get(name, {}).get('info', True)
+
+    def panel_crt(self, name):
+        """the CRT look (a phosphor beam with persistence, glow and white-hot lines); off: clean lines"""
+        return self.panel_opts.get(name, {}).get('crt', True)
+
+    def panel_overburn(self, name):
+        """the high light level of the CRT look (a strong halo, lines burning to white): chosen for the window, else what the theme does (the Classic theme has the low one)"""
+        return self.panel_opts.get(name, {}).get('overburn', self.th.glow)
+
+    def panel_colors(self, name):
+        """(left, right) colours of a window: its own, else the theme's"""
+        o = self.panel_opts.get(name, {})
+        return o.get('left', self.th.left), o.get('right', self.th.right)
+
+    def panel_vec_color(self):
+        return self.panel_opts.get('vec', {}).get('color', self.th.vec)
+
+    def panel_at(self, x, y):
+        """the window (osc, vec, met, spec, hist) under the point, or None; while one fills the window, that one"""
+        if self.zoom is not None:
+            return self.zoom
+        for n in PANELS:
+            x0, y0, x1, y1 = self.panel_frame.get(n) or self.P[n]
+            if n == 'spec':
+                y1 += self.S(32)  # the names of the equaliser ranges under the graph belong to it
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                return n
+        return None
+
+    def set_panel_opt(self, name, key, value):
+        self.panel_opts.setdefault(name, {})[key] = value
+        self.save_settings()
+        self.refresh_panels()
+
+    def reset_panel_colors(self, name):
+        for k in ('left', 'right', 'color'):
+            self.panel_opts.get(name, {}).pop(k, None)
+        if not self.panel_opts.get(name):
+            self.panel_opts.pop(name, None)
+        self.save_settings()
+        self.refresh_panels()
+
+    def ask_color(self, initial, title):
+        """the system's colour picker: the colour chosen as #rrggbb, or None"""
+        from tkinter import colorchooser
+        return colorchooser.askcolor(color=initial, title=title, parent=self.root)[1]
+
+    def pick_panel_color(self, name, key):
+        cur = self.panel_vec_color() if key == 'color' else self.panel_colors(name)[0 if key == 'left' else 1]
+        what = {'left': 'left channel', 'right': 'right channel', 'color': 'vectorscope'}[key]
+        got = self.ask_color(cur, '%s: %s colour' % (PANEL_TITLES[name], what))
+        if got and HEX_COLOUR.match(got):
+            self.set_panel_opt(name, key, got.lower())
+
+    def menu_marks(self, px):
+        """the two little pictures that go to the left of a menu item: a tick in the menu's text colour, and nothing of the same size"""
+        from PIL import ImageDraw
+        big = 4 * px
+        im = Image.new('RGBA', (big, big), (0, 0, 0, 0))
+        col = tuple(int(self.th.fg[i:i + 2], 16) for i in (1, 3, 5)) + (255,)
+        ImageDraw.Draw(im).line([(0.14 * big, 0.55 * big), (0.40 * big, 0.80 * big), (0.86 * big, 0.22 * big)], fill=col, width=max(2, int(0.15 * big)), joint='curve')
+        tick = ImageTk.PhotoImage(im.resize((px, px), Image.Resampling.LANCZOS), master=self.root)
+        blank = ImageTk.PhotoImage(Image.new('RGBA', (px, px), (0, 0, 0, 0)), master=self.root)
+        return tick, blank
+
+    def panel_menu_build(self, name):
+        """the menu of a window: its grid, its info (numbers and text), CRT glow (off: clean lines), Overburn (the high light level; only with CRT glow) and its colours (left and right; the vectorscope has one)"""
+        th = self.th
+        menu = tk.Menu(self.root, tearoff=0, bg=th.btn, fg=th.fg, activebackground=th.btn_hi, activeforeground='white', bd=0, relief='flat', font=self.F(9, 'Segoe UI'))
+        title = PANEL_TITLES[name] if not (name == 'spec' and self.spec_mode == 'spectrogram') else 'Spectrogram'
+        menu.add_command(label=title, font=self.F(9, 'Segoe UI', True), foreground=th.accent_hi, activeforeground=th.accent_hi, activebackground=th.btn, command=lambda: None)  # a heading, in a clear colour (a greyed-out entry is drawn as small embossed text)
+        menu.add_separator()
+        px = max(10, int(round(tkfont.Font(root=self.root, font=self.F(9, 'Segoe UI')).metrics('linespace') * 0.8)))
+        tick, blank = self.menu_marks(px)  # a tick or an empty space of the same size to the left of the words: the words line up, and nothing is drawn over them
+        grid_on, info_on, crt_on, burn_on = self.panel_grid(name), self.panel_info(name), self.panel_crt(name), self.panel_overburn(name)
+        menu.add_command(label='Grid', image=(tick if grid_on else blank), compound='left', command=lambda: self.set_panel_opt(name, 'grid', not grid_on))
+        menu.add_command(label='Info', image=(tick if info_on else blank), compound='left', command=lambda: self.set_panel_opt(name, 'info', not info_on))
+        menu.add_command(label='CRT glow', image=(tick if crt_on else blank), compound='left', command=lambda: self.set_panel_opt(name, 'crt', not crt_on))
+        if crt_on:  # the light level only means something for the CRT look
+            menu.add_command(label='Overburn', image=(tick if burn_on else blank), compound='left', command=lambda: self.set_panel_opt(name, 'overburn', not burn_on))
+        menu.add_separator()
+        if name == 'vec':
+            menu.add_command(label='Colour...', command=lambda: self.pick_panel_color(name, 'color'))
+        else:
+            menu.add_command(label='Left colour...', command=lambda: self.pick_panel_color(name, 'left'))
+            menu.add_command(label='Right colour...', command=lambda: self.pick_panel_color(name, 'right'))
+        own = any(k in self.panel_opts.get(name, {}) for k in ('left', 'right', 'color'))
+        if own:  # only when there is something to go back from
+            menu.add_command(label='Back to the theme colour' if name == 'vec' else 'Back to the theme colours', command=lambda: self.reset_panel_colors(name))
+        menu._on, menu._marks = (grid_on, info_on, crt_on, burn_on), (tick, blank)  # what is ticked; the pictures are kept alive with the menu
+        return menu
+
+    def panel_menu(self, e):
+        name = self.panel_at(e.x, e.y)
+        if name is None:
+            return
+        menu = self.panel_menu_build(name)
+        try:
+            menu.tk_popup(e.x_root, e.y_root)
+        finally:
+            menu.grab_release()
 
     def build_controls(self):
         f = tk.Frame(self.root, bg=self.th.panel)
@@ -2468,7 +2723,7 @@ class App:
         self.spec_mode = mode
         self.c.itemconfig('spec', state=('normal' if mode == 'spectrum' else 'hidden'))
         self.c.itemconfig('sg', state=('normal' if mode == 'spectrogram' else 'hidden'))
-        self.c.itemconfig(self.spec_title, text=('SPECTRUM' if mode == 'spectrum' else 'SPECTROGRAM  (frequency up, time across; white line = playhead)'))
+        self.c.itemconfig(self.spec_title, text=('SPECTRUM' if mode == 'spectrum' else 'SPECTROGRAM'))
 
     # --- clip / mode helpers ---
     def vol_now(self):
@@ -3398,6 +3653,10 @@ class App:
             self.refresh_rows()
             self.update_transport()
             self.draw_timeline()
+            wk = self.plots.get('hist')
+            if wk is not None and self.zoom in (None, 'hist'):
+                self.show_plot('hist', self.hist_item, wk)  # the picture built since the last frame goes on screen, at the same steady beat as the other graphs
+            self.refresh_history()
             if not self.paused:
                 self.draw()
         except Exception:
@@ -3495,7 +3754,7 @@ class App:
             if dbn[i] >= self.hold[i] or tnow - self.hold_t[i] > 1.5:
                 self.hold[i], self.hold_t[i] = dbn[i], tnow
             xb = self.bar_xs[i]
-            bars.append((xb, self.bar_top + min(1.0, max(0.0, -dbn[i] / 60.0)) * self.bar_h, xb + S(50), self.bar_top + self.bar_h))
+            bars.append((xb, self.bar_top + min(1.0, max(0.0, -dbn[i] / 60.0)) * self.bar_h, xb + self.ms(50), self.bar_top + self.bar_h))
             holds.append(self.bar_top + min(1.0, max(0.0, -self.hold[i] / 60.0)) * self.bar_h)
         rms = [math.sqrt(float(np.mean(x[-9600:, i] ** 2))) for i in (0, 1)]
         # balance: both channels at once, from the centre outwards: the left level grows to the left, the right level to the right (same 60 dB scale as the peak bars).
@@ -3503,11 +3762,11 @@ class App:
         for i in (0, 1):
             now = db(rms[i]) + cd
             self.bal_lv[i] = now if now > self.bal_lv[i] else self.bal_lv[i] + (now - self.bal_lv[i]) * 0.2
-        half = S(139)
+        half = self.ms(139)
         lens = [min(1.0, max(0.0, (60.0 + v_) / 60.0)) * half for v_ in self.bal_lv]
-        bal_rects = [(self.bal_x - lens[0], self.bal_y - S(5), self.bal_x, self.bal_y + S(5)), (self.bal_x, self.bal_y - S(5), self.bal_x + lens[1], self.bal_y + S(5))]
+        bal_rects = [(self.bal_x - lens[0], self.bal_y - self.ms(5), self.bal_x, self.bal_y + self.ms(5)), (self.bal_x, self.bal_y - self.ms(5), self.bal_x + lens[1], self.bal_y + self.ms(5))]
         self.met_geom = {'bars': bars, 'hold': holds, 'bal': bal_rects}  # canvas coordinates
-        if self.zoom is None:
+        if self.zoom in (None, 'met'):
             self.draw_bars(x0 + 1, y0 + 1)
         bal = (self.bal_lv[1] - self.bal_lv[0]) if min(self.bal_lv) > -100 else 0.0
         c.itemconfig(self.bal_lbl, text='%-16s%+.1f dB' % ('balance', -bal + 0.0))  # positive: the left channel is louder (its bar is the longer)
@@ -3565,36 +3824,42 @@ class App:
         x0, y0, x1, y1 = self.P[name]
         w, h = int(x1 - x0) + 1, int(y1 - y0) + 1
         th = self.th
-        glow = 1.0 if th.glow else 0.35  # the Classic theme keeps crisp lines
-        colors = (th.left, th.right)
-        rows = [int(round(i * (h - 1) / float(len(DB_LINES) - 1))) for i in range(len(DB_LINES))]
+        glow = 1.0 if self.panel_overburn(name) else 0.35  # the high light level, or the low one that keeps the lines crisp (the Classic theme has it)
+        crt = self.panel_crt(name)
+        grid = self.panel_grid(name)
+        colors = self.panel_colors(name)
+
+        def mk(base, tau, exposure, power, max_bits, blend='add'):
+            return BeamPlot(base, th.bg, colors, tau, exposure, power, max_bits, glow, blend) if crt else CleanPlot(base, th.bg, colors)
+        rows = [int(round(i * (h - 1) / float(len(DB_LINES) - 1))) for i in range(len(DB_LINES))] if grid else []
         if name == 'osc':
-            pl = BeamPlot(plot_base(w, h, th.bg, th.grid, middle=True), th.bg, colors, 0.025, 1.3, 0.35, 64, glow)
+            pl = mk(plot_base(w, h, th.bg, th.grid, middle=grid), 0.025, 1.3, 0.35, 64)
         elif name == 'spec':
             bands, cols = [], []
-            for i, (lo, hi, _names, _rng) in enumerate(EQ_BANDS):
+            for i, (lo, hi, _names, _rng) in enumerate(EQ_BANDS if grid else ()):
                 a, b_ = int(round(self.fx(max(lo, 30)) - x0)), int(round(self.fx(hi) - x0))
                 if i % 2:
                     bands.append((a, b_))
                 if lo > 30:
                     cols.append(a)
-            pl = BeamPlot(plot_base(w, h, th.bg, th.grid, th.peak, rows, cols, bands, mix(th.bg, th.fg, 0.05)), th.bg, colors, 0.04, 3.2, 0.25, 64, glow)
+            pl = mk(plot_base(w, h, th.bg, th.grid, th.peak, rows, cols, bands, mix(th.bg, th.fg, 0.05)), 0.04, 3.2, 0.25, 64)
         elif name == 'met':
             wm, hm = int(x1 - x0) - 1, int(y1 - y0) - 1  # the picture is one pixel inside the panel's frame
             a = plot_base(wm, hm, th.bg, th.grid, frame=False)
             g = np.array(rgbtuple(th.grid), np.uint8)
-            for xb in self.bar_xs:  # the frames of the two level bars
-                xa, ya, xz, yz = int(xb - x0 - 1), int(self.bar_top - y0 - 1), int(xb + self.S(50) - x0 - 1), int(self.bar_top + self.bar_h - y0 - 1)
+            for xb in (self.bar_xs if grid else ()):  # the frames of the two level bars
+                xa, ya, xz, yz = int(xb - x0 - 1), int(self.bar_top - y0 - 1), int(xb + self.ms(50) - x0 - 1), int(self.bar_top + self.bar_h - y0 - 1)
                 a[ya, xa:xz + 1] = g
                 a[yz, xa:xz + 1] = g
                 a[ya:yz + 1, xa] = g
                 a[ya:yz + 1, xz] = g
-            by, cx, half = int(self.bal_y - y0 - 1), int(self.bal_x - x0 - 1), self.S(139)
-            a[by, cx - half:cx + half + 1] = g  # the balance bar's baseline and centre mark
-            a[by - self.S(7):by + self.S(7) + 1, cx] = g
-            pl = BeamPlot(a, th.bg, colors, 0.05, 1.3, 1.0, 64, glow)
+            by, cx, half = int(self.bal_y - y0 - 1), int(self.bal_x - x0 - 1), self.ms(139)
+            if grid:
+                a[by, cx - half:cx + half + 1] = g  # the balance bar's baseline and centre mark
+                a[by - self.ms(7):by + self.ms(7) + 1, cx] = g
+            pl = BeamPlot(a, th.bg, colors, 0.05, 1.3, 1.0, 64, glow, flat=not crt)
         else:  # a level history has to keep its dips visible, so a fast stroke is not dimmed (power 0)
-            pl = BeamPlot(plot_base(w, h, th.bg, th.grid, th.peak, rows), th.bg, colors, 0.05, 0.32, 0.0, 200, glow, 'white')  # each channel keeps its colour; where they overlap the line turns white, without the thick burnt band that adding their light made
+            pl = mk(plot_base(w, h, th.bg, th.grid, th.peak, rows), 0.05, 0.32, 0.0, 200, 'white')  # each channel keeps its colour; where they overlap the line turns white, without the thick burnt band that adding their light made
         wk = self.plots[name] = BeamWorker(pl, self.THREADED)
         return wk
 
@@ -3644,9 +3909,12 @@ class App:
         side = int(min(x1 - x0, y1 - y0)) - 2
         size = max(64, min(side, 520))
         wk = self.plots.get('vec')
-        if wk is None or wk.plot.screen.size != size or wk.plot.side != side:
+        crt = self.panel_crt('vec')
+        glow = 1.0 if self.panel_overburn('vec') else 0.35
+        if wk is None or wk.plot.screen.size != size or wk.plot.side != side or wk.plot.glow != glow or wk.plot.clean == crt:
             self.stop_plot('vec')
-            wk = self.plots['vec'] = BeamWorker(BeamVector(size, side, self.vec_lut), self.THREADED)
+            plot = BeamVector(size, side, self.vec_lut, glow) if crt else CleanVector(size, side, self.panel_vec_color(), self.BG, glow)
+            wk = self.plots['vec'] = BeamWorker(plot, self.THREADED)
             self.beam, self.vec_last = wk.plot.screen, None
         pos = self.player.pos if clip is not None else self.cap.pos
         new = None if self.vec_last is None else pos - self.vec_last
@@ -3672,7 +3940,8 @@ class App:
         starts on the canvas"""
         wk = self.beam_plot('met')
         geom = self.met_geom
-        R = lambda v, o: int(round(v)) - int(o)
+        f, th2 = wk.plot.f, max(2, int(round(2 * self.mz * wk.plot.f)))  # (the picture may be drawn smaller than it is shown, when it is big; th2: the thickness of the bright edges)
+        R = lambda v, o: int(round((int(round(v)) - int(o)) * f))
         spans = []
         for i in (0, 1):
             bx0, ty, bx1, by = (R(geom['bars'][i][0], ox), R(geom['bars'][i][1], oy), R(geom['bars'][i][2], ox), R(geom['bars'][i][3], oy))
@@ -3685,11 +3954,11 @@ class App:
                 buf[:] = 0.0
                 if by - ty > 1:
                     buf[ty:by, bx0 + 1:bx1] = 0.22  # the fill (dim: the glow adds to it, and over a whole bar it would otherwise turn white)
-                    buf[ty:ty + 2, bx0 + 1:bx1] = 6.0  # the white-hot edge
-                buf[max(0, hy - 1):hy + 1, bx0:bx1 + 1] = 10.0  # the hold line
+                    buf[ty:ty + th2, bx0 + 1:bx1] = 6.0  # the white-hot edge
+                buf[max(0, hy - th2 // 2):max(0, hy - th2 // 2) + th2, bx0:bx1 + 1] = 10.0  # the hold line
                 if rx1 - rx0 > 1:
                     buf[ry0:ry1, rx0:rx1] = 0.22
-                    edge = slice(rx0, rx0 + 2) if i == 0 else slice(rx1 - 2, rx1)
+                    edge = slice(rx0, rx0 + th2) if i == 0 else slice(rx1 - th2, rx1)
                     buf[ry0:ry1, edge] = 6.0
         wk.add(job)
         self.show_plot('met', self.met_item, wk)
@@ -3763,30 +4032,38 @@ class App:
         c.itemconfig(self.sg_item, image=self.sg_photo)
         c.coords(self.sg_head, (head if head is not None else -10), y0, (head if head is not None else -10), y1)
 
-    def history_loop(self):
-        try:
-            self.refresh_history()
-        except Exception:
-            self.c.itemconfig(self.status, text='drawing error: ' + traceback.format_exc().splitlines()[-1])
-        self.root.after(4, self.history_loop)
+    def smooth_pos(self, pos, running):
+        """the position (samples) of the sound that is shown, as a smooth number.  The real one only moves in whole 10 ms blocks that arrive in bursts, so what is drawn from it would judder;
+        this follows it with a clock that runs at the sound's own speed and is nudged towards the real position, so it cannot drift"""
+        now = time.perf_counter()
+        st = self.pos_clock
+        if st is None or not running or abs(pos - st[1]) > 0.1 * SR:  # the first time, a stopped sound, or a jump (a seek, a loop)
+            self.pos_clock = (now, float(pos))
+            return float(pos)
+        est = st[1] + (now - st[0]) * SR
+        est += (pos - est) * 0.08
+        self.pos_clock = (now, est)
+        return est
 
     def refresh_history(self):
-        """redraw the level history when it has moved on by a pixel or what it shows has changed.  It has its own fast timer because the main loop runs at a different and uneven pace"""
+        """redraw the level history when it has moved on by an eighth of a pixel or what it shows has changed: called once a frame, so the line moves a fraction of a pixel at a time, at the
+        same steady beat as the other graphs (it used to step a whole pixel, about 17 times a second, at the pace of a timer of its own)"""
         if self.paused or self.mode == 'compare' or (self.findings_on and self.mode == 'review') or self.zoom not in (None, 'hist'):
-            return False
-        if time.time() - self.plot_time.get('hist', 0.0) < 0.03:  # at most about 30 pictures a second, however wide the history is
             return False
         x0, y0, x1, y1 = self.P['hist']
         width = int(x1 - x0)
         clip = self.clip if self.mode == 'review' else None
         if clip is not None:
+            posf = max(1.0, self.smooth_pos(self.player.pos, self.player.playing) / float(BLOCK))
             total = min(len(clip.peaks), max(1, self.player.pos // BLOCK))
             cd = (-clip.vol_db) if (self.comp and clip.vol_db is not None) else 0.0
         else:
+            posf = self.smooth_pos(self.cap.pos, True) / float(BLOCK)
             total = self.cap.pos // BLOCK
             v = self.cap.vol
             cd = (-v[0]) if (self.comp and v and not v[2]) else 0.0
-        key = ((total - 1) * width // HIST_BLOCKS, round(cd, 2), id(clip), width)  # the column the newest block is in
+        cur = posf * width / HIST_BLOCKS  # where "now" is, in columns, as a fraction: the history moves by a fraction of a pixel at a time
+        key = (int(cur * 8), round(cd, 2), id(clip), width)  # a new picture for every eighth of a column
         if key == self.hist_key:
             return False
         self.hist_key = key
@@ -3796,12 +4073,13 @@ class App:
             with self.cap.lock:
                 hist = list(self.cap.hist)
                 total = self.cap.pos // BLOCK
-        self.draw_history(hist, cd, total)
+        self.draw_history(hist, cd, total, cur)
         return True
 
-    def draw_history(self, hist, cd, total):
+    def draw_history(self, hist, cd, total, cur=None):
         """hist: the last blocks (oldest first, (peak L, peak R) each) of a run of `total` blocks.  The panel has one column per pixel and every block belongs to one fixed column
-        (block * width // 3000), so a complete column never changes and the picture moves left by exactly one pixel when the next column completes"""
+        (block * width // 3000), so a complete column never changes.  cur: where "now" is, in columns (a fraction): every column is drawn at its age from there, so the whole line moves
+        smoothly; without it the newest complete column sits at the right edge and the picture moves a whole pixel at a time"""
         x0, y0, x1, y1 = self.P['hist']
         width = int(x1 - x0)
         arr = np.asarray(hist, dtype=np.float64)
@@ -3813,9 +4091,11 @@ class App:
         ids = cols[starts][1:-1]
         if len(ids) < 2:
             return
-        keep = ids > ids[-1] - width
+        keep = ids > ids[-1] - width - (0 if cur is None else 3)  # (with a fraction of a pixel to shift by, a few columns more than fit)
         bars, ids = bars[keep], ids[keep]
-        xs = (x1 - (ids[-1] - ids)).astype(float)
+        if cur is None:
+            cur = float(ids[-1] + 1)  # the newest complete column at the right edge
+        xs = x1 + 1.0 + ids - cur
         wk = self.beam_plot('hist')
         self.plot_time['hist'] = time.time()
         self.hist_pts, paths = [], []
@@ -3825,7 +4105,7 @@ class App:
             paths.append((xs - x0, ys - y0))
             self.hist_pts.append((xs, ys))
 
-        offsets = self.HIST_OFFSETS
+        offsets = self.HIST_OFFSETS if self.panel_crt('hist') else (0.0,)  # (a clean line is drawn once)
 
         def job(pl):
             pl.clear()  # a fresh picture each time: the history scrolls, it does not fade

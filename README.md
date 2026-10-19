@@ -35,7 +35,8 @@ the window appears.
 - peak meters with hold, and a left/right balance meter
 - a count of clipped 10 ms blocks per channel (blocks with a flat top at full scale)
 - spectrum, with the ranges an equaliser uses named along its bottom (sub-bass 20-60 Hz, bass 60-250, low mids 250-500, mids 500-2k, upper mids 2k-4k, presence 4k-6k, brilliance 6k-20k), or a scrolling spectrogram (`G`), and a 30 second level history (the spectrum and the history share one dB scale, 0 down to -80, so their lines match, and silence is the same bottom line in both)
-- double-click the oscilloscope, vectorscope, spectrum or level history and it fills the whole window with nothing else on it (no buttons, no text; the keys still work), double-click again to get everything back
+- double-click the oscilloscope, vectorscope, levels, spectrum or level history and it fills the whole window with nothing else on it (no buttons, no text; the keys still work), double-click again to get everything back
+- right-click a window (oscilloscope, vectorscope, levels, spectrum, level history): turn its grid on or off, its info (all its numbers and text) on or off, CRT glow on or off (off turns all the phosphor effects off and leaves clean lines), Overburn (only with CRT glow on: ticked is the high light level, unticked the crisp low one of the Classic theme), and pick its own left and right colours (the vectorscope has one); the choices are remembered
 - input: the Windows default output (follows it when you change device), any other output, or any microphone
 - a dark title bar in the colours of the theme (Windows 10 and 11), and the program's own icon on the window and the taskbar
 

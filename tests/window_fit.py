@@ -71,11 +71,12 @@ import threading
 import time
 pump(root, 3.0)
 check('the graphs have threads of their own, and their pictures reach the window', all(n_ in app.plots and app.plots[n_].thread.is_alive() for n_ in ('osc', 'spec', 'vec')) and all(app.photos.get(n_) is not None for n_ in ('osc', 'spec', 'vec')), (sorted(app.plots), sorted(app.photos)))
-check('the window thread spends little time per frame (the drawing is not done on it)', app.work_ms < 15.0, round(app.work_ms, 1))
-s0, h0_, t_0 = app.plots['spec'].seq, app.plots['osc'].seq, time.time()
+check('the window thread spends little time per frame (the drawing is not done on it: it used to be over 25 ms, with the history redrawing 30 times a second it is about 15 ms)', app.work_ms < 20.0, round(app.work_ms, 1))
+s0, h0_, hh0_, t_0 = app.plots['spec'].seq, app.plots['osc'].seq, app.plots['hist'].seq, time.time()
 pump(root, 2.0)
-rate_spec, rate_osc = (app.plots['spec'].seq - s0) / (time.time() - t_0), (app.plots['osc'].seq - h0_) / (time.time() - t_0)
+rate_spec, rate_osc, rate_hist = (app.plots['spec'].seq - s0) / (time.time() - t_0), (app.plots['osc'].seq - h0_) / (time.time() - t_0), (app.plots['hist'].seq - hh0_) / (time.time() - t_0)
 check('the spectrum and the oscilloscope get a new picture about every frame (no skipped frames)', rate_spec >= 24 and rate_osc >= 24, (round(rate_spec, 1), round(rate_osc, 1)))
+check('the level history gets a new picture about every frame too (it moves by a fraction of a pixel each time, not a pixel at a time)', rate_hist >= 24, round(rate_hist, 1))
 workers = [wk.thread for wk in app.plots.values()]
 app.stop_plots()
 for th_ in workers:
