@@ -75,5 +75,5 @@ except ValueError:
 # slice and statistics
 part = clip.slice(0.5, 1.0)
 check('slice is the requested length', abs(part.duration - 0.5) < 1e-3, part.duration)
-check('integrated loudness is cached per offset', clip.integrated(0.0) == clip.integrated(0.0) and clip.integrated(6.0) > clip.integrated(0.0))
+check('integrated loudness is worked out once', clip.integrated() == clip.integrated() and clip._int is not False)
 T.finish()

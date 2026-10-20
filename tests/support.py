@@ -13,6 +13,26 @@ import pc_audio_scope as m                  # noqa: E402
 from pc_audio_scope import SR, BLOCK        # noqa: E402
 m.App.THREADED = False                      # the graphs are drawn on the calling thread, so a test sees the picture at once (window_fit.py and beam.py test the threads)
 
+
+
+def _menu_index(self, what):
+    return len(self.entries) - 1 if what == 'end' else int(what)
+
+
+def _menu_type(self, i):
+    return self.entries[i]['kind']
+
+
+def _menu_entrycget(self, i, opt):
+    e = self.entries[i]
+    th = self.app.th
+    got = {'label': e.get('label', ''), 'image': str(e['image']) if e.get('image') is not None else '', 'compound': 'left', 'state': 'normal',
+           'foreground': th.accent_hi if e.get('heading') else th.fg, 'font': '{Segoe UI} 9 bold' if e.get('heading') else '{Segoe UI} 9'}
+    return got[opt]
+
+
+m.PanelMenu.index, m.PanelMenu.type, m.PanelMenu.entrycget = _menu_index, _menu_type, _menu_entrycget  # the calls of a tk.Menu that the tests make on a menu of ours
+
 fails = []
 
 

@@ -18,7 +18,7 @@ root.withdraw()
 app = m.App(root, cap)
 
 # ---- every documented key is bound
-keys = ['<space>', '<F5>', 'c', 'r', 'u', 'l', '<Control-o>', 'g', 'f', 'm', '<Delete>', '<Prior>', '<Next>', 'i', 'o', 'x', 'p', 'e', '1', '2', '3',
+keys = ['<space>', '<F5>', 'r', 'u', 'l', '<Control-o>', 'g', 'f', 'm', '<Delete>', '<Prior>', '<Next>', 'i', 'o', 'x', 'p', 'e', '1', '2', '3',
         '<Left>', '<Right>', '<Shift-Left>', '<Alt-Left>', '<Alt-Shift-Left>', '<Alt-Control-Left>', '<Home>', '<End>', 'q', '<Escape>']
 check('all documented keys are bound', all(root.bind(k) for k in keys), [k for k in keys if not root.bind(k)])
 check('the scope gain controls are gone: their keys are unbound and nothing of them is left', not any(root.bind(k) for k in ('<plus>', '<equal>', '<minus>', 'a')) and not callable(getattr(app, 'zoom', None)) and not hasattr(app, 'b_auto') and not hasattr(app, 'auto'))
@@ -28,14 +28,32 @@ for w_ in app.controls.winfo_children():
         labels.append(str(w_.cget('text')))
     except tk.TclError:
         pass
-check('the controls row has no gain, auto gain or Windows volume button, and Reset peaks sits right after Theme', not [t_ for t_ in labels if 'gain' in t_.lower() or 'volume' in t_.lower()] and not hasattr(app, 'b_comp')
+check('the controls row has no gain or auto gain button, and Reset peaks sits right after Theme', not [t_ for t_ in labels if 'gain' in t_.lower()]
       and [t_ for t_ in labels if t_.startswith('Theme')] and labels.index([t_ for t_ in labels if t_.startswith('Theme')][0]) + 1 == labels.index('Reset peaks  (R)'), labels)
+check('the Bypass Windows volume button, its C key and the switch behind it are gone', not [t_ for t_ in labels if 'bypass' in t_.lower() or 'windows volume' in t_.lower()]
+      and not hasattr(app, 'b_comp') and not hasattr(app, 'comp') and not hasattr(app, 'toggle_comp') and not root.bind('c'), labels)
+app.draw()
+t_live_ = app.c.itemcget(app.status, 'text')
+app.paused = True
+app.draw()
+t_paused_ = app.c.itemcget(app.status, 'text')
+app.paused = False
+check('plain live listening does not start the status line with the word LIVE (the bottom right says it), a pause does say PAUSED', not t_live_.startswith('LIVE') and t_live_.startswith(app.cap.device) and t_paused_.startswith('PAUSED   |   '), (t_live_, t_paused_))
+vol_before_ = app.cap.vol
+app.cap.vol = (-3.8, 0.78, False)
+app.draw()
+txt_ = app.c.itemcget(app.status, 'text')
+check('the status line shows the Windows volume and nothing about a bypass', txt_.endswith('Windows volume 78% (-3.8 dB)') and 'ypass' not in txt_, txt_)
+app.cap.vol = (-80.0, 0.0, True)
+app.draw()
+txt_ = app.c.itemcget(app.status, 'text')
+check('a muted output has no warning in the status line, and the line is not red', 'MUTED' not in txt_ and 'nothing is heard' not in txt_ and app.c.itemcget(app.status, 'fill') == app.TXT, (txt_, app.c.itemcget(app.status, 'fill')))
+app.cap.vol = vol_before_
 app.cap.sess = [0.5, 0.4]
 app.cap.flat = [3, 2]
 app.hold[:] = [-3.0, -4.0]
 app.b_reset.invoke()
 check('Reset peaks clears the session peaks, the clipped-block counts and the held peaks', list(app.cap.sess) == [0.0, 0.0] and list(app.cap.flat) == [0, 0] and list(app.hold) == [m.FLOOR, m.FLOOR], (app.cap.sess, app.cap.flat, app.hold))
-check('the levels are shown as measured by default (the C key can ignore the Windows volume)', app.comp is False and bool(root.bind('c')))
 T.mute_keys(root)
 
 
@@ -59,21 +77,27 @@ check('live: the figures of the two channels are in two columns (the labels padd
       all(len(l_) == 35 and l_[15:18] == '   ' and l_[24:29] == '     ' and l_[18:24].strip() != '' and l_[29:35].strip() != '' for l_ in lines_) and 'L' not in txt and 'R' not in txt, lines_)
 from tkinter import font as tkfont_l
 mf_ = tkfont_l.Font(root=root, font=app.F(9))
-lr_items = {app.c.itemcget(i, 'text'): i for i in app.c.find_all() if app.c.type(i) == 'text' and app.c.itemcget(i, 'text') in (chr(10).join('LLLL'), chr(10).join('RRRR'))}
-tx_, ty_ = app.c.coords(app.m_txt)
+dc_row_ = app.c.itemcget(app.dc_txt, 'text')
+check('live: the DC offset is the row above hold, in the same columns as the figures under it (no percent signs)',
+      dc_row_.startswith('DC offset') and len(dc_row_) == 35 and dc_row_[15:18] == '   ' and dc_row_[24:29] == '     ' and '%' not in dc_row_
+      and abs(app.c.coords(app.dc_txt)[0] - app.c.coords(app.m_txt)[0]) < 0.6 and abs(app.c.coords(app.m_txt)[1] - app.c.coords(app.dc_txt)[1] - mf_.metrics('linespace')) < 1.5, (dc_row_, app.c.coords(app.dc_txt), app.c.coords(app.m_txt)))
+lr_items = {app.c.itemcget(i, 'text'): i for i in app.c.find_all() if app.c.type(i) == 'text' and app.c.itemcget(i, 'text') in (chr(10).join('LLLLL'), chr(10).join('RRRRR'))}
+tx_, ty_ = app.c.coords(app.dc_txt)  # (the Ls and Rs start at the DC offset row, the first row of the block)
 check('live: all the Ls are one column in the left channel colour and all the Rs one column in the right channel colour, in the blank places of the figures',
-      len(lr_items) == 2 and app.c.itemcget(lr_items[chr(10).join('LLLL')], 'fill') == app.CL and app.c.itemcget(lr_items[chr(10).join('RRRR')], 'fill') == app.CR
-      and abs(app.c.coords(lr_items[chr(10).join('LLLL')])[0] - (tx_ + mf_.measure(' ' * 16))) < 0.6 and abs(app.c.coords(lr_items[chr(10).join('RRRR')])[0] - (tx_ + mf_.measure(' ' * 27))) < 0.6
-      and abs(app.c.coords(lr_items[chr(10).join('LLLL')])[1] - ty_) < 0.6 and abs(app.c.coords(lr_items[chr(10).join('RRRR')])[1] - ty_) < 0.6, (lr_items, app.CL, app.CR))
+      len(lr_items) == 2 and app.c.itemcget(lr_items[chr(10).join('LLLLL')], 'fill') == app.CL and app.c.itemcget(lr_items[chr(10).join('RRRRR')], 'fill') == app.CR
+      and abs(app.c.coords(lr_items[chr(10).join('LLLLL')])[0] - (tx_ + mf_.measure(' ' * 16))) < 0.6 and abs(app.c.coords(lr_items[chr(10).join('RRRRR')])[0] - (tx_ + mf_.measure(' ' * 27))) < 0.6
+      and abs(app.c.coords(lr_items[chr(10).join('LLLLL')])[1] - ty_) < 0.6 and abs(app.c.coords(lr_items[chr(10).join('RRRRR')])[1] - ty_) < 0.6, (lr_items, app.CL, app.CR))
 bal_line = app.c.itemcget(app.bal_lbl, 'text')
-check('live: the sign of the balance figure is in the column of the Ls above it', bal_line.startswith('balance') and bal_line.index(bal_line.split()[1]) == 16 and bal_line.endswith(' dB'), bal_line)
+check('live: the balance figure is a number in dB with no sign, the number under the first digits of the figures above', bal_line.startswith('balance') and bal_line[16:18] == '  ' and bal_line[18].isdigit() and bal_line.endswith(' dB') and '+' not in bal_line and '-' not in bal_line, bal_line)
 bal_txt = app.c.itemcget(app.bal_lbl, 'text')
-bal_n = float(bal_txt.split()[1])
+bal_side = app.c.itemcget(app.bal_side, 'text')
+check('live: the side letter of the balance figure is drawn in the column of the Ls and Rs above it', abs(app.c.coords(app.bal_side)[0] - (tx_ + mf_.measure(' ' * 16))) < 0.6 and bal_side in ('', 'L', 'R'), (app.c.coords(app.bal_side), bal_side))
+bal_n = float(bal_txt.split()[1]) * {'L': 1, 'R': -1, '': 0}[bal_side]
 bl, br = list(app.met_geom['bal'][0]), list(app.met_geom['bal'][1])
 len_l, len_r = app.bal_x - bl[0], br[2] - app.bal_x
 check('the balance label is just "balance"', bal_txt.startswith('balance ') and 'L-R' not in bal_txt and 'R-L' not in bal_txt, bal_txt)
 check('the balance shows both channels at once: the left bar grows to the left of the centre, the right bar to the right, each by its own level', len_l > 0 and len_r > 0 and bl[2] == app.bal_x and br[0] == app.bal_x, (bl, br, app.bal_x))
-check('a positive balance figure means the left is louder, so its bar is the longer one', (bal_n > 0.05 and len_l > len_r) or (bal_n < -0.05 and len_r > len_l) or abs(bal_n) <= 0.05, (bal_txt, len_l, len_r))
+check('an L in the balance figure means the left is louder, so its bar is the longer one; an R the right', (bal_n > 0.05 and len_l > len_r) or (bal_n < -0.05 and len_r > len_l) or abs(bal_n) <= 0.05, (bal_txt, len_l, len_r))
 check('vectorscope: the picture of a beam screen is drawn from the sound', app.beam is not None and app.photos.get('vec') is not None and float(app.beam.buf.max()) > 0 and bool(app.c.itemcget(app.vec_item, 'image')), (app.beam is not None, app.photos.get('vec') is not None))
 app.cap.eq_note = 'Equalizer APO undone'
 pump(root, 0.3)
@@ -109,8 +133,8 @@ txt_bb, lbl_bb = app.c.bbox(app.m_txt), app.c.bbox(app.bal_lbl)
 bars_bottom = app.bar_top + app.bar_h
 check('the text is one block at the bottom of the panel (the balance figure its last line, just above the bottom line), and the balance bar is level with the centre line of the vectorscope (between the level bars and the text)',
       my1 - lbl_bb[3] < app.S(14) and lbl_bb[3] <= my1 and lbl_bb[1] > txt_bb[3] - app.S(8) and abs(app.bal_y - (app.P['vec'][1] + app.P['vec'][3]) / 2.0) <= 1 and bars_bottom < app.bal_y - app.S(5) and app.bal_y + app.S(5) < txt_bb[1], (txt_bb, lbl_bb, my1, app.bal_y, bars_bottom, app.P['vec']))
-all_text = [(app.c.itemcget(i, 'text'), app.c.coords(i)[0]) for i in app.c.find_all() if app.c.type(i) == 'text']
-check('the levels panel has no L, R, LEFT or RIGHT words and the vectorscope title is just its name',
+all_text = [(app.c.itemcget(i, 'text'), app.c.coords(i)[0]) for i in app.c.find_all() if app.c.type(i) == 'text' and i != app.bal_side]
+check('the levels panel has no L, R, LEFT or RIGHT words (but the letter of the balance figure) and the vectorscope title is just its name',
       not [t_ for t_, x_ in all_text if t_ in ('L', 'R', 'LEFT', 'RIGHT') and x_ >= app.P['met'][0]] and 'VECTORSCOPE' in [t_ for t_, _ in all_text] and not any('left across' in t_ for t_, _ in all_text), [t_ for t_, _ in all_text if len(t_) < 8][:20])
 check('live: no correlation meter any more', not hasattr(app, 'cor_lbl') and not hasattr(app, 'cor_mark') and not any('correlation' in app.c.itemcget(i, 'text') for i in app.c.find_all() if app.c.type(i) == 'text'))
 check('clip row hidden while live', app.clip_row.winfo_manager() == '' and app.cmp_row.winfo_manager() == '', (app.clip_row.winfo_manager(), app.cmp_row.winfo_manager()))
@@ -131,7 +155,7 @@ check('Spectrogram button switches back', app.spec_mode == 'spectrum')
 app.set_spec_mode('spectrogram')
 pump(root, 1.5)
 no_error('live spectrogram')
-check('live spectrogram: image drawn', app.sg_photo is not None)
+check('live spectrogram: image drawn', app.photos.get('sg') is not None)
 app.set_spec_mode('spectrum')
 # ---- the spectrum names the equaliser ranges along its bottom, and the oscilloscope no longer prints its gain
 texts = [app.c.itemcget(i, 'text') for i in app.c.find_withtag('spec') if app.c.type(i) == 'text']
@@ -150,8 +174,8 @@ rows_s, rows_h = db_rows('spec'), db_rows('hist')
 check('spectrum and level history: the same dB numbers on the same rows (they sit side by side)', len(rows_s) == 9 and {k: v[1] for k, v in rows_s.items()} == {k: v[1] for k, v in rows_h.items()}, (rows_s, rows_h))
 check('spectrum and level history: both graphs end on the -80 dB line, at the same row', abs(rows_s['-80 dB'][1] - py1) <= 1 and app.P['spec'][1::2] == app.P['hist'][1::2], (rows_s.get('-80 dB'), app.P['spec'], app.P['hist']))
 check('the dB numbers have their own column: left of every graph, so no trace can run through them', all(x_ < app.P['spec'][0] for x_, _ in rows_s.values()) and all(x_ < app.P['hist'][0] for x_, _ in rows_h.values()) and px0 > app.panel_frame['spec'][0] + app.S(30), (px0, app.panel_frame['spec']))
-app.draw_spectrum(np.zeros(4096), np.zeros(4096), 0.0)
-app.draw_history([(0.0, 0.0)] * 3100, 0.0, 4000)
+app.draw_spectrum(np.zeros(4096), np.zeros(4096))
+app.draw_history([(0.0, 0.0)] * 3100, 4000)
 ys_s, ys_h = app.spec_pts[0][1], app.hist_pts[0][1]
 check('with no sound the spectrum and the level history both draw their line on the same bottom row', set(ys_s) == {float(py1)} and set(ys_h) == {float(py1)}, (sorted(set(ys_s))[:3], sorted(set(ys_h))[:3], py1))
 check('the spectrum and level history headers are plain', app.c.itemcget(app.spec_title, 'text') == 'SPECTRUM' and app.c.itemcget(app.hist_title, 'text') == 'LEVEL HISTORY', (app.c.itemcget(app.spec_title, 'text'), app.c.itemcget(app.hist_title, 'text')))
@@ -211,7 +235,7 @@ for name in ('osc', 'vec', 'met', 'spec', 'hist'):
         check('the enlarged levels draw their bars and balance bars bigger too', app.met_geom is not None and app.met_geom['bars'][0][2] - app.met_geom['bars'][0][0] == app.ms(50) and app.ms(50) > app.S(50) * 1.5, (app.met_geom['bars'][0], app.ms(50)))
     if name == 'vec':
         check('the zoomed vectorscope stays square', app.P['vec'][2] - app.P['vec'][0] == app.P['vec'][3] - app.P['vec'][1], app.P['vec'])
-        check('the zoomed vectorscope gets a bigger beam screen, drawn from the sound', app.beam is not None and 300 < app.beam.size <= 520 and float(app.beam.buf.max()) > 0, app.beam.size if app.beam else None)
+        check('the zoomed vectorscope gets a bigger beam screen, drawn from the sound', app.beam is not None and 300 < app.beam.size <= m.VEC_MAX and float(app.beam.buf.max()) > 0, app.beam.size if app.beam else None)
     if name == 'spec':
         check('the zoomed spectrum still names its ranges under the graph', any(app.c.itemcget(i, 'text') == 'Bass' and app.c.coords(i)[1] > app.P['spec'][3] and app.c.coords(i)[0] < app.CW for i in app.c.find_withtag('spec') if app.c.type(i) == 'text'))
     app.scope_click(Ev0(x=app.S(300), y=app.S(300)))
@@ -233,7 +257,7 @@ rng_s = np.random.default_rng(11)
 L_s, R_s = rng_s.standard_normal(4096) * 0.05, np.sin(np.arange(4096) * 0.31) * 0.2
 app.panel_opts.clear()
 app.refresh_panels()
-app.draw_spectrum(L_s, R_s, 0.0)
+app.draw_spectrum(L_s, R_s)
 x0_, y0_, x1_, y1_ = app.P['spec']
 win_ = np.hanning(4096)
 fr_ = np.fft.rfftfreq(4096, 1.0 / m.SR)
@@ -278,7 +302,8 @@ for n_ in ('osc', 'spec', 'met'):
             wrong_ += 1
     mism_.append((n_, wrong_, by_, wk_.last_band))
 check('the pictures in the window are the pictures that were made: the background and, on top, the rows with light: after many frames every pixel looked at is right (no old light left behind)', all(c_[1] == 0 for c_ in mism_), mism_)
-# the governor: busy while the window cannot keep up, and it lets go only with plenty of room
+# the governor: busy while the window cannot keep up (at the slowest frame rate: above it the frame rate gives way first), and it lets go only with plenty of room
+app.fps = m.FPS_MIN
 app.work_ms, app.redraw_ms, app._busy = 5.0, 5.0, False
 app.frame = 1
 b0_ = app.busy()
@@ -359,8 +384,8 @@ def stepper_labels(menu_):
 
 mn_ = app.panel_menu_build('osc')
 mv_ = app.panel_menu_build('vec')
-check('the menu of a window: its name, Grid, Info, the stepper rows Phosphor and Line strength, the left and the right colour (and nothing to go back from yet)',
-      menu_labels(mn_) == ['Oscilloscope', 'Grid', 'Info', 'Left colour...', 'Right colour...'] and stepper_labels(mn_) == ['Phosphor', 'Glow', 'Line strength'], (menu_labels(mn_), stepper_labels(mn_)))
+check('the menu of the oscilloscope: its name, Grid, Info, the stepper rows Phosphor, Glow, Line strength and Scope rate, the left and the right colour (and nothing to go back from yet)',
+      menu_labels(mn_) == ['Oscilloscope', 'Grid', 'Info', 'Left colour...', 'Right colour...'] and stepper_labels(mn_) == ['Phosphor', 'Glow', 'Line strength', 'Scope rate'], (menu_labels(mn_), stepper_labels(mn_)))
 check('the vectorscope has one colour, not two', menu_labels(mv_) == ['Vectorscope', 'Grid', 'Info', 'Colour...'], menu_labels(mv_))
 check('the menu shows what is on now: the grid and the info are on, and the oscilloscope has Phosphor 0.4 (the vectorscope 1.0)', mn_._on == (True, True, True, 0.4) and mv_._on == (True, True, True, 1.0), (mn_._on, mv_._on))
 check('a tick is a little picture left of the words (a blank one of the same size when off), not a Tk check mark that is drawn over them',
@@ -440,7 +465,7 @@ check('the spectrogram has no caption, just its name', app.c.itemcget(app.spec_t
 app.set_spec_mode('spectrum')
 app.panel_menu_build('met').invoke(3)
 app.draw()
-check('Info off for the levels: the text block, the balance figure and the numbers are hidden but still kept up to date', app.c.itemcget(app.m_txt, 'state') == 'hidden' and app.c.itemcget(app.bal_lbl, 'state') == 'hidden' and app.c.itemcget(app.m_txt, 'text').startswith('hold'), (app.c.itemcget(app.m_txt, 'state'), app.c.itemcget(app.m_txt, 'text')[:12]))
+check('Info off for the levels: the text block (with the DC offset row), the balance figure and the numbers are hidden but still kept up to date', app.c.itemcget(app.dc_txt, 'state') == 'hidden' and app.c.itemcget(app.m_txt, 'state') == 'hidden' and app.c.itemcget(app.bal_lbl, 'state') == 'hidden' and app.c.itemcget(app.m_txt, 'text').startswith('hold'), (app.c.itemcget(app.m_txt, 'state'), app.c.itemcget(app.m_txt, 'text')[:12]))
 check('Info is kept in the settings as true or false', (app.save_settings() or True) and json.load(open(m.SETTINGS))['panels']['met']['info'] is False and json.load(open(m.SETTINGS))['panels']['spec']['info'] is False, json.load(open(m.SETTINGS)).get('panels'))
 app.panel_opts.clear()
 app.refresh_panels()
@@ -493,8 +518,8 @@ app.pick_panel_color('vec', 'color')
 check('a colour picked for the vectorscope (it has one): its beam palette is that colour', app.vec_lut.tolist() == m.beam_palette(app.BG, '#ff00ff').tolist() and app.panel_vec_color() == '#ff00ff', app.panel_opts)
 app.ask_color = lambda initial, title: '#00ffaa'
 app.pick_panel_color('met', 'right')
-lr_txt = {app.c.itemcget(i_, 'text'): app.c.itemcget(i_, 'fill') for i_ in app.c.find_all() if app.c.type(i_) == 'text' and app.c.itemcget(i_, 'text') in (chr(10).join('LLLL'), chr(10).join('RRRR'))}
-check('a colour picked for the right of the levels: the level bar and the letters R in the levels text have it', app.panel_colors('met')[1] == '#00ffaa' and lr_txt[chr(10).join('RRRR')] == '#00ffaa' and lr_txt[chr(10).join('LLLL')] == th_.left
+lr_txt = {app.c.itemcget(i_, 'text'): app.c.itemcget(i_, 'fill') for i_ in app.c.find_all() if app.c.type(i_) == 'text' and app.c.itemcget(i_, 'text') in (chr(10).join('LLLLL'), chr(10).join('RRRRR'))}
+check('a colour picked for the right of the levels: the level bar and the letters R in the levels text have it', app.panel_colors('met')[1] == '#00ffaa' and lr_txt[chr(10).join('RRRRR')] == '#00ffaa' and lr_txt[chr(10).join('LLLLL')] == th_.left
       and app.beam_plot('met').plot.luts[1].tolist() == m.beam_palette(th_.bg, '#00ffaa', light=True).tolist(), (lr_txt, app.panel_opts))
 app.ask_color = lambda initial, title: 'red'
 before_ = {k_: dict(v_) for k_, v_ in app.panel_opts.items()}
@@ -505,7 +530,8 @@ saved_ = json.load(open(m.SETTINGS))
 check('the choices are kept in the settings file, and read back (anything invalid in it is dropped)', saved_['panels'] == app.panel_opts and m.clean_panel_opts(saved_['panels']) == app.panel_opts
       and m.clean_panel_opts({'osc': {'grid': 'yes', 'left': '#GGGGGG', 'classic': True, 'info': 'no'}, 'bogus': {'grid': False}, 'vec': {'color': '#ABCDEF', 'left': '#123456'}, 'hist': 5}) == {'osc': {'burn': 0.4}, 'vec': {'color': '#abcdef'}}
       and m.clean_panel_opts(None) == {}, (saved_.get('panels'), app.panel_opts))
-app.panel_menu_build('osc').invoke(10)  # back to the theme colours
+mm_ = app.panel_menu_build('osc')
+mm_.invoke([i_ for i_ in range(mm_.index('end') + 1) if mm_.type(i_) == 'command' and mm_.entrycget(i_, 'label') == 'Back to the theme colours'][0])  # back to the theme colours
 app.reset_panel_colors('vec')
 app.reset_panel_colors('met')
 check('"back to the theme colours" gives the window the theme colours again, and forgets the choice', app.panel_colors('osc') == (th_.left, th_.right) and app.panel_vec_color() == th_.vec and app.panel_colors('met') == (th_.left, th_.right)
@@ -521,8 +547,9 @@ app.refresh_panels()
 for n_ in ('osc', 'vec', 'spec', 'hist'):
     app.draw()
 bm_ = {n_: app.panel_menu_build(n_) for n_ in ('osc', 'vec', 'spec', 'hist', 'met')}
-check('Phosphor and Line strength are stepper rows in the menu of the oscilloscope, vectorscope, spectrum and history; the levels have Phosphor only',
-      all(stepper_labels(bm_[n_]) == ['Phosphor', 'Glow', 'Line strength'] for n_ in ('osc', 'vec', 'spec', 'hist')) and stepper_labels(bm_['met']) == ['Phosphor', 'Glow'], [stepper_labels(bm_[n_]) for n_ in bm_])
+check('Phosphor and Line strength are stepper rows in the menu of the oscilloscope, vectorscope, spectrum and history (and Scope rate in the first two); the levels have Phosphor only',
+      all(stepper_labels(bm_[n_]) == ['Phosphor', 'Glow', 'Line strength', 'Scope rate'] for n_ in ('osc', 'vec')) and all(stepper_labels(bm_[n_]) == ['Phosphor', 'Glow', 'Line strength'] for n_ in ('spec', 'hist'))
+      and stepper_labels(bm_['met']) == ['Phosphor', 'Glow'], [stepper_labels(bm_[n_]) for n_ in bm_])
 check('the start: Phosphor 0.4 (the vectorscope 1.0, the levels 1.0 unless the theme is Classic), Line strength 6, none for the levels',
       [app.panel_burn_level(n_) for n_ in ('osc', 'spec', 'hist', 'vec', 'met')] == [0.4, 0.4, 0.4, 1.0, 1.0 if app.th.glow else 0.4] and all(app.panel_strength(n_) == 6 for n_ in ('osc', 'vec', 'spec', 'hist')) and app.panel_strength('met') == 1
       and [m.burn_text(n_) for n_ in (0, 4, 14, 30)] == ['Off', '0.4', '1.4', '3.0'] and [m.strength_text(n_) for n_ in (1, 6, 9, 10)] == ['1', '6', '9', '10'], bm_['osc']._on)
@@ -893,7 +920,7 @@ hw = int(hx1 - hx0)
 
 def history_at(total):
     """the line the panel shows after `total` blocks: the absolute column of each vertex and the vertices"""
-    app.draw_history(peaks[max(0, total - 3100):total], 0.0, total)
+    app.draw_history(peaks[max(0, total - 3100):total], total)
     pts = np.stack([app.hist_pts[0][0], app.hist_pts[0][1]], axis=1)
     newest = (total - 1) * hw // 3000 - 1  # the newest complete column sits at the right edge
     return newest - (hx1 - pts[:, 0]), pts
@@ -914,7 +941,7 @@ check('history: the picture moves by 0 or exactly 1 pixel per block (the panel w
 
 
 def history_cur(total, cur):
-    app.draw_history(peaks[max(0, total - 3100):total], 0.0, total, cur)
+    app.draw_history(peaks[max(0, total - 3100):total], total, cur)
     return np.stack([app.hist_pts[0][0], app.hist_pts[0][1]], axis=1)
 
 
@@ -975,6 +1002,25 @@ for _ in range(40):
     app.draw()
 bl, br = list(app.met_geom['bal'][0]), list(app.met_geom['bal'][1])
 check('right channel only: the right bar is long and the left bar has no length', br[2] - app.bal_x > app.S(60) and app.bal_x - bl[0] < 1, (bl, br, app.bal_x))
+app.open_loaded(m.Clip(np.stack([sig, sig * 0.5], axis=1), None, name='left 6 dB louder'))
+app.player.pos = 2 * m.SR + 4096
+for _ in range(40):
+    app.draw()
+check('left 6 dB louder: the balance figure says L 6.0 dB, the L in the left channel colour', app.c.itemcget(app.bal_side, 'text') == 'L' and app.c.itemcget(app.bal_side, 'fill') == app.CL and app.c.itemcget(app.bal_lbl, 'text').split()[1:] == ['6.0', 'dB'], (app.c.itemcget(app.bal_side, 'text'), app.c.itemcget(app.bal_lbl, 'text')))
+bal_cols = [app.c.itemcget(app.bal_lbl, 'text').index('6.0')]
+app.open_loaded(m.Clip(np.stack([sig * 0.5, sig], axis=1), None, name='right 6 dB louder'))
+app.player.pos = 2 * m.SR + 4096
+for _ in range(40):
+    app.draw()
+check('right 6 dB louder: the balance figure says R 6.0 dB, the R in the right channel colour', app.c.itemcget(app.bal_side, 'text') == 'R' and app.c.itemcget(app.bal_side, 'fill') == app.CR and app.c.itemcget(app.bal_lbl, 'text').split()[1:] == ['6.0', 'dB'], (app.c.itemcget(app.bal_side, 'text'), app.c.itemcget(app.bal_lbl, 'text')))
+bal_cols.append(app.c.itemcget(app.bal_lbl, 'text').index('6.0'))
+app.open_loaded(m.Clip(np.stack([sig, sig], axis=1), None, name='both alike'))
+app.player.pos = 2 * m.SR + 4096
+for _ in range(40):
+    app.draw()
+check('both channels alike: the balance figure is 0.0 dB with no letter', app.c.itemcget(app.bal_side, 'text') == '' and app.c.itemcget(app.bal_lbl, 'text').split()[1:] == ['0.0', 'dB'], (app.c.itemcget(app.bal_side, 'text'), app.c.itemcget(app.bal_lbl, 'text')))
+bal_cols.append(app.c.itemcget(app.bal_lbl, 'text').index('0.0'))
+check('the balance number stays in one column whether there is a letter in front of it or not (it does not jump)', bal_cols == [18, 18, 18], bal_cols)
 app.go_live()
 
 # ---- finding problems in a clip: button, markers, panel, saved report, DC readout
@@ -1007,18 +1053,19 @@ app.find_problems_key()
 app.draw()
 check('Find problems: clean music has nothing above "worth knowing"', not [q for q in app.clip.findings if q['severity'] >= 2], [(q['t'], q['kind']) for q in app.clip.findings if q['severity'] >= 2])
 app.find_problems_key()
-# the DC readout in the title row of the levels panel
+# the DC offset, the first row of the figures in the levels panel
 app.open_loaded(faulty)
 app.player.pos = 10 * m.SR  # the right channel carries +25 % DC here
 app.frame = 0
 app.draw()
 txt = app.c.itemcget(app.dc_txt, 'text')
-check('DC readout: shows the offset per channel', 'DC' in txt and abs(app.dc_now[1] - 25.0) < 3.0 and abs(app.dc_now[0]) < 3.0, (txt, app.dc_now))
+check('DC readout: shows the offset per channel as plain numbers (no percent signs)', txt.startswith('DC offset') and '%' not in txt and abs(app.dc_now[1] - 25.0) < 3.0 and abs(app.dc_now[0]) < 3.0 and abs(float(txt.split()[3]) - 25.0) < 3.0, (txt, app.dc_now))
+len_big_ = len(txt)
 check('DC readout: is highlighted when an offset is large', app.c.itemcget(app.dc_txt, 'fill') == app.th.peak, app.c.itemcget(app.dc_txt, 'fill'))
 app.player.pos = 2 * m.SR
 app.frame = 0
 app.draw()
-check('DC readout: is hidden for a clean stretch', abs(app.dc_now[0]) < 1.0 and abs(app.dc_now[1]) < 1.0 and app.c.itemcget(app.dc_txt, 'text') == '', (app.dc_now, app.c.itemcget(app.dc_txt, 'text')))
+check('DC readout: a clean stretch reads a solid 0.0 on both channels, in the normal text colour, and the text is as long as with an offset (nothing jumps)', abs(app.dc_now[0]) < 1.0 and abs(app.dc_now[1]) < 1.0 and app.c.itemcget(app.dc_txt, 'text').split() == ['DC', 'offset', '0.0', '0.0'] and app.c.itemcget(app.dc_txt, 'fill') == app.TXT and len(app.c.itemcget(app.dc_txt, 'text')) == len_big_, (app.dc_now, app.c.itemcget(app.dc_txt, 'text')))
 tt2 = np.arange(3 * m.SR) / float(m.SR)
 s2 = 0.3 * np.sin(2 * np.pi * 220 * tt2)
 for dc_amount, shown in ((0.005, False), (0.02, True)):
@@ -1027,12 +1074,13 @@ for dc_amount, shown in ((0.005, False), (0.02, True)):
     app.frame = 0
     app.draw()
     txt = app.c.itemcget(app.dc_txt, 'text')
-    check('DC readout: %.1f %% is %s' % (dc_amount * 100, 'shown (and not red below 3 %)' if shown else 'hidden (under 1 %)'),
-          ('DC' in txt and app.c.itemcget(app.dc_txt, 'fill') == app.th.dim) if shown else txt == '', (txt, app.dc_now))
+    check('DC readout: %.1f %% is %s' % (dc_amount * 100, 'shown (in the normal colour, not red below 3 %)' if shown else 'still a solid 0.0 (under 1 %)'),
+          (txt.split() == ['DC', 'offset', '%+.1f' % (dc_amount * 100), '0.0'] and app.c.itemcget(app.dc_txt, 'fill') == app.TXT) if shown
+          else (txt.split() == ['DC', 'offset', '0.0', '0.0'] and app.c.itemcget(app.dc_txt, 'fill') == app.TXT), (txt, app.dc_now))
 app.go_live()
 app.frame = 0
 app.draw()
-check('DC readout: nothing to say about the live sound while it has no offset', app.c.itemcget(app.dc_txt, 'text') == '', (app.c.itemcget(app.dc_txt, 'text'), app.dc_now))
+check('DC readout: the live sound without an offset reads a solid 0.0 on both channels', app.c.itemcget(app.dc_txt, 'text').split() == ['DC', 'offset', '0.0', '0.0'], (app.c.itemcget(app.dc_txt, 'text'), app.dc_now))
 
 # ---- themes
 def rgb(c):
@@ -1044,7 +1092,7 @@ import re
 def hex_colours(theme):
     out = []
     for key, val in vars(theme).items():
-        if key in ('name', 'lname', 'rname'):
+        if key == 'name':
             continue
         out += val if isinstance(val, list) else ([val] if isinstance(val, str) else [])
     return out
@@ -1069,7 +1117,7 @@ for _ in m.THEMES:
                 pass
         return n
     check('theme %s: the 0 dB lines and their labels use its peak colour' % th.name, painted(th.peak) >= 4, painted(th.peak))
-    check('theme %s: the L and R letters of the levels text are in the left and right channel colours' % th.name, sorted(app.c.itemcget(i, 'fill') for i in app.c.find_all() if app.c.type(i) == 'text' and app.c.itemcget(i, 'text') in (chr(10).join('LLLL'), chr(10).join('RRRR'))) == sorted([app.CL, app.CR]) and (app.CL, app.CR) == (th.left, th.right), (app.CL, app.CR, th.left, th.right))
+    check('theme %s: the L and R letters of the levels text are in the left and right channel colours' % th.name, sorted(app.c.itemcget(i, 'fill') for i in app.c.find_all() if app.c.type(i) == 'text' and app.c.itemcget(i, 'text') in (chr(10).join('LLLLL'), chr(10).join('RRRRR'))) == sorted([app.CL, app.CR]) and (app.CL, app.CR) == (th.left, th.right), (app.CL, app.CR, th.left, th.right))
     check('theme %s: the level bars and the balance bars are drawn in the two channel colours' % th.name, app.plots['met'].plot.luts[0].tolist() == m.beam_palette(th.bg, th.left, light=True).tolist() and app.plots['met'].plot.luts[1].tolist() == m.beam_palette(th.bg, th.right, light=True).tolist(), th.name)
 check('cycling through every theme comes back to the first', app.th.name == first)
 app.cycle_theme()
@@ -1098,7 +1146,6 @@ app.go_live()
 # ---- settings
 app.theme_i = 2
 app.use_theme()
-app.comp = True
 app.set_spec_mode('spectrogram')
 app.player.loop = True
 app.save_settings()
@@ -1116,8 +1163,8 @@ cap.stop = True
 root2 = tk.Tk()
 root2.withdraw()
 app2 = m.App(root2, T.SynthCapture())
-check('settings restored', (app2.comp, app2.spec_mode, app2.player.loop) == (False, 'spectrogram', True), (app2.comp, app2.spec_mode, app2.player.loop))
-check('the gain and the Windows volume switch are not settings: every start is automatic gain, levels as measured', 'auto' not in saved and 'gain' not in saved and 'comp' not in saved, sorted(saved))
+check('settings restored', (app2.spec_mode, app2.player.loop) == ('spectrogram', True), (app2.spec_mode, app2.player.loop))
+check('the gain is not a setting: every start is automatic gain', 'auto' not in saved and 'gain' not in saved and 'comp' not in saved, sorted(saved))
 check('the theme is restored', app2.th.name == 'Amber phosphor', app2.th.name)
 root2.destroy()
 T.finish()

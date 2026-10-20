@@ -77,9 +77,21 @@ check('BeamPlot: the picture has the size of the graph', pl.image().size == (100
 lc_, rc_ = np.array(rgb(th.left)), np.array(rgb(th.right))
 check('BeamPlot: the left channel lights its line in the left colour, the right channel in the right colour', float((left_px - right_px) @ (lc_ - rc_)) > 10000, (left_px.tolist(), right_px.tolist(), lc_.tolist(), rc_.tolist()))
 check('BeamPlot: the lines are far brighter than the background, and a few pixels away only a faint glow is left', left_px.sum() > base[12, 50].sum() + 150 and far_px.sum() <= base[45, 50].astype(int).sum() + 30, (left_px.sum(), far_px.tolist()))
-wide = m.BeamPlot(m.plot_base(1500, 300, th.bg, th.grid), th.bg, (th.left, th.right), 0.03, 1.3)
-wide.add(0, np.linspace(0, 1499, 400), np.full(400, 150.0), 0.0)
-check('BeamPlot: a very wide graph is drawn smaller and enlarged, still to its own size', wide.f < 1.0 and wide.screens[0].w < 1500 and wide.image().size == (1500, 300), (wide.f, wide.screens[0].w))
+mid = m.BeamPlot(m.plot_base(1500, 300, th.bg, th.grid), th.bg, (th.left, th.right), 0.03, 1.3)
+check('BeamPlot: a graph up to MAX_W wide is drawn at its own size (an enlarged window is as sharp as a small one)', mid.f == 1.0 and mid.screens[0].w == 1500 and m.BeamPlot.MAX_W >= 1500, (mid.f, mid.screens[0].w))
+wide = m.BeamPlot(m.plot_base(2400, 300, th.bg, th.grid), th.bg, (th.left, th.right), 0.03, 1.3)
+wide.add(0, np.linspace(0, 2399, 400), np.full(400, 150.0), 0.0)
+check('BeamPlot: a very wide graph is drawn smaller and enlarged, still to its own size', wide.f < 1.0 and wide.screens[0].w < 2400 and wide.image().size == (2400, 300), (wide.f, wide.screens[0].w))
+
+# an enlarged vectorscope gets more light, so a line is as bright as in the normal layout (the same light on a longer line is dimmer)
+small_v, big_v = m.BeamVector(276, 276, m.beam_palette(th.bg, th.left, light=True), 1.0, 276), m.BeamVector(730, 730, m.beam_palette(th.bg, th.left, light=True), 1.0, 276)
+ring_u = 0.6 * np.cos(np.linspace(0, 2 * np.pi, 400))
+ring_v = 0.6 * np.sin(np.linspace(0, 2 * np.pi, 400))
+small_v.screen.add(ring_u, ring_v, 0.0)
+big_v.screen.add(ring_u, ring_v, 0.0)
+check('BeamVector: the normal size gets no extra light, an enlarged one gets more than in proportion to its size, up to a limit', small_v.screen.energy == 1.0 and abs(big_v.screen.energy - (730 / 276.0) ** 1.5) < 1e-9
+      and m.BeamVector(5000, 5000, m.beam_palette(th.bg, th.left, light=True), 1.0, 276).screen.energy == 8.0, (small_v.screen.energy, big_v.screen.energy))
+check('BeamVector: the same ring on the enlarged screen is as bright at its brightest as on the small one (it is not dimmer)', float(big_v.screen.buf.max()) >= 0.9 * float(small_v.screen.buf.max()), (float(big_v.screen.buf.max()), float(small_v.screen.buf.max())))
 
 # ---- the worker: the graph is drawn on a thread of its own
 import threading

@@ -48,11 +48,14 @@ try:
 except Exception:
     comtypes = None
 
-# ---------------------------------------------------------------- signal analysis (no GUI, no audio device)
-# block statistics, ITU-R BS.1770 loudness (LUFS), stereo correlation, a log-frequency spectrogram and the comparison of two recordings
-# (alignment, per-window similarity, null test).  All audio is float32 stereo at 48 kHz.
+# ---- signal analysis (no GUI, no audio device): block statistics, loudness (LUFS), correlation, a spectrogram, comparing two recordings; all audio is float32 stereo at 48 kHz
 SR = 48000
 BLOCK = SR // 100  # 10 ms
+SCOPE_SMOOTH = 4  # points per sample drawn between the samples at the scope rate
+SCOPE_CONTEXT = 8  # (48 kHz) samples drawn behind the newest, so the interpolation has its neighbours
+SCOPE_CHOICES = (0, 48000, 96000, 192000)  # 0 is Auto
+FPS_MIN, FPS_MAX = 30.0, 60.0  # the frames a second the window is drawn at: anywhere between these, as the computer allows
+OSC_TAU, SPEC_TAU = 0.025, 0.04  # how long the light of the oscilloscope and of the spectrum lasts (seconds)
 FLOOR = -120.0
 
 
@@ -101,7 +104,23 @@ def _kaiser_sinc(tau, cutoff, half):
     return cutoff * np.sinc(cutoff * tau) * np.i0(5.0 * np.sqrt(1.0 - u * u)) / np.i0(5.0)
 
 
-def resample_poly(x, up, down, axis=0):
+_UP_FIR = {}
+
+
+def sinc_upsample(x, up, half=12):
+    """x (m,) -> (m * up,): the samples with up - 1 more between each pair, by band-limited interpolation (a sinc under a Kaiser window, `half` samples either side).  Between the samples the path is what the
+    sound card's reconstruction filter would give: a circle of only six samples a turn comes out round.  Zero outside the signal, so the few samples at each end are not to be trusted"""
+    x = np.asarray(x, dtype=np.float64)
+    if up <= 1:
+        return x
+    if (up, half) not in _UP_FIR:
+        _UP_FIR[(up, half)] = _Fir(_kaiser_sinc(np.arange(-half * up, half * up + 1) / float(up), 1.0, float(half)))
+    z = np.zeros(len(x) * up + 2 * half * up)
+    z[half * up:half * up + len(x) * up:up] = x
+    return _UP_FIR[(up, half)].valid(z)
+
+
+def resample_poly(x, up, down):
     """resample along the first axis by up / down with a windowed-sinc low-pass (the design of scipy's resample_poly); zero outside the signal"""
     x = np.asarray(x, dtype=np.float64)
     if x.ndim == 2:
@@ -278,16 +297,14 @@ def lufs(energy):
     return FLOOR if energy <= 1e-12 else max(FLOOR, -0.691 + 10.0 * math.log10(energy))
 
 
-def integrated(ms, offset_db=0.0):
-    """gated integrated loudness (absolute gate -70 LUFS, relative gate -10 LU), None if nothing is loud enough.  offset_db is added to every level (volume compensation)."""
+def integrated(ms):
+    """gated integrated loudness (absolute gate -70 LUFS, relative gate -10 LU), None if nothing is loud enough"""
     ms = np.asarray(ms, dtype=np.float64)
     if len(ms) < 40:
         return None
     cs = np.concatenate([[0.0], np.cumsum(ms)])
     starts = np.arange(0, len(ms) - 39, 10)  # 400 ms blocks, 100 ms hop
     z = (cs[starts + 40] - cs[starts]) / 40.0
-    k = 10.0 ** (offset_db / 10.0)
-    z = z * k
     l = np.where(z > 1e-12, -0.691 + 10.0 * np.log10(np.maximum(z, 1e-12)), FLOOR)
     keep = l > -70.0
     if not keep.any():
@@ -313,8 +330,8 @@ EQ_BANDS = (
     (4000, 6000, ('Presence', 'Pres.'), '4k-6k'),
     (6000, 20000, ('Brilliance', 'Air'), '6k-20k'),
 )
-# the spectrum and the level history sit side by side and share one dB scale: the same range, the same lines on the same rows
-DB_RANGE = 80.0  # 0 dB at the top of the graph, -80 dB at the bottom; anything quieter, and silence, is drawn on the bottom line in both
+# the spectrum and the level history share one dB scale
+DB_RANGE = 80.0  # 0 dB at the top, -80 dB at the bottom; anything quieter is drawn on the bottom line
 DB_LINES = (0, -10, -20, -30, -40, -50, -60, -70, -80)
 
 
@@ -479,7 +496,7 @@ def window_stats(ca, cb, win_s=1.0, hop_s=0.5, search_s=1.0):
     for i, s in enumerate(starts):
         if not act_a[i] and not act_b[i]:
             continue
-        if act_a[i] != act_b[i]:  # only one of them makes sound here
+        if act_a[i] != act_b[i]:
             sim[i], resid[i] = 0.0, 0.0
             lvl[i] = 30.0 if act_b[i] else -30.0
             continue
@@ -499,8 +516,7 @@ def window_stats(ca, cb, win_s=1.0, hop_s=0.5, search_s=1.0):
     return dict(win_t=np.array(starts) / fs, sim=sim, lvl=lvl, resid=resid, lag=lag, level_db=level_db, null_db=null_db, diff=diff.astype(np.float32), hop_s=hop_s)
 
 
-# ---------------------------------------------------------------- finding problems in a recording
-# Everything here looks at each channel on its own: a fault in one channel is hidden in a stereo (mono) mix, and loudness (LUFS) ignores DC.
+# ---------------------------------------------------------------- finding problems in a recording: each channel on its own (a fault in one channel hides in a stereo mix, and loudness ignores DC)
 _NL = chr(10)
 CHANNELS = ('L', 'R')
 CHANNEL_NAMES = {'L': 'LEFT', 'R': 'RIGHT', 'both': 'both'}
@@ -621,7 +637,7 @@ def find_problems(data, vol_db=None):
                     continue  # the neighbours are busy too: a burst of sound (a hi-hat, noise), not a single click
                 add('click', CHANNELS[c], g / float(SR), 0.0, mx[i], 'click or pop (a jump of %.2f between neighbouring samples)' % mx[i], 2)
     # clipping, out of phase, one channel far quieter
-    peaks, flat = analyze(x)
+    flat = analyze(x)[1]
     for c in (0, 1):
         for a, b in _runs(flat[:, c], 1, 50):
             if int(flat[a:b, c].sum()) >= 3:
@@ -664,7 +680,6 @@ def findings_image(data, vol_db, findings, title='', width=1600, left='#ff8a1f',
     x = comp(data, vol_db) if vol_db is not None else np.asarray(data)
     dur = len(x) / float(SR)
     f = channel_features(x, 0.1)
-    n = len(f['rms'])
     lv = 20 * np.log10(np.maximum(f['rms'], 1e-6))
     mx, rx = 70, width - 20
     pw = rx - mx
@@ -789,7 +804,7 @@ def format_comparison(rows, name_a='A', name_b='B'):
     return lines
 
 
-def analyze_files(paths, out=None):
+def analyze_files(paths):
     """the --analyze command: for every WAV a text report, a JSON file and an overview picture next to it; for two WAVs also the segment comparison.  -> the text"""
     clips = [Clip.load(p) for p in paths]
     text = []
@@ -820,10 +835,9 @@ FROZEN = bool(getattr(sys, 'frozen', False))  # running as a packaged program
 
 PANELS = ('osc', 'vec', 'met', 'spec', 'hist')
 PANEL_TITLES = {'osc': 'Oscilloscope', 'vec': 'Vectorscope', 'met': 'Levels', 'spec': 'Spectrum', 'hist': 'Level history'}
-DEFAULT_THEME = 'Orange + blue'  # the theme a first run starts with
-# what a window starts with before anything is chosen in its menu (anything not listed is on): the enlarged windows have no grid, and no info except the spectrum and the level history; the spectrum has no grid
-# in the normal layout either
-# 'burn' (Phosphor) and 'wide' (Glow) too, for a theme with glow (the Classic theme keeps its crisp look: only the vectorscope burns, nothing wide)
+DEFAULT_THEME = 'Orange + blue'
+# what a window starts with before anything is chosen in its menu (missing = on): enlarged windows have no grid and, except the spectrum and the level history, no info; the spectrum has no grid in the normal layout either
+# 'burn' (Phosphor) and 'wide' (Glow) too, for a theme with glow (Classic keeps its crisp look: only the vectorscope burns, nothing wide)
 PANEL_DEFAULTS = {'osc': {'fs_grid': False, 'fs_info': False, 'burn': 0.3, 'wide': 0.5}, 'vec': {'fs_grid': False, 'fs_info': False, 'burn': 0.3, 'wide': 0.3},
                   'met': {'fs_grid': False, 'fs_info': False, 'burn': 1.0, 'wide': 0.3}, 'hist': {'fs_grid': False, 'burn': 0.3, 'wide': 0.2},
                   'spec': {'grid': False, 'fs_grid': False, 'burn': 0.3, 'wide': 0.3}}
@@ -831,9 +845,7 @@ HEX_COLOUR = re.compile(r'^#[0-9a-fA-F]{6}$')
 
 
 def clean_panel_opts(d):
-    """the choices made for each window (right-click it), as read from the settings file: anything unknown or invalid is left out.  Per window: 'grid', 'info' (its numbers and text) and the same two for when it fills the window, 'fs_grid' and 'fs_info', 'crt'
-    'burn' (Phosphor: the glow of the phosphor beam, 0 = clean lines, to 3), 'wide' (Glow: a broad, faint glow, 0 to 3), 'strength' (Line strength, 1 to 10: how solid the beam's lines are), 'left' and 'right' (a colour each; the vectorscope has just 'color').  'glow' was the first
-    name of 'overburn', 'classic' the one before it (the other way round)"""
+    """the choices made for each window (right-click it), as read from the settings file; anything unknown or invalid is left out.  Per window: 'grid' and 'info' (its numbers and text), 'fs_grid' and 'fs_info' (the same for when it fills the window), 'crt', 'burn' (Phosphor, 0 to 3), 'wide' (Glow, 0 to 3), 'strength' (Line strength, 1 to 10), 'left' and 'right' (a colour each; the vectorscope has just 'color')"""
     out = {}
     if not isinstance(d, dict):
         return out
@@ -841,7 +853,7 @@ def clean_panel_opts(d):
         if name not in PANELS or not isinstance(o, dict):
             continue
         keep = {k: o[k] for k in ('grid', 'info', 'fs_grid', 'fs_info') if isinstance(o.get(k), bool)}
-        st = o.get('strength', o.get('bold'))  # ('bold' was its first name, with a tick)
+        st = o.get('strength', o.get('bold'))  # 'bold' was its first name
         if isinstance(st, bool):
             st = STRENGTH_DEFAULT if st else STRENGTH_MIN
         elif isinstance(st, str):
@@ -851,7 +863,7 @@ def clean_panel_opts(d):
         burn = o.get('burn')
         if isinstance(burn, (int, float)) and not isinstance(burn, bool) and 0 <= burn <= BURN_MAX:
             keep['burn'] = round(float(burn) * 10) / 10.0
-        elif o.get('crt') is False:  # (CRT burn was on or off, and Overburn on or off; now it is one level, Phosphor.  'glow' and 'classic' were the first names of Overburn)
+        elif o.get('crt') is False:  # CRT burn and Overburn became the one Phosphor level; 'glow' and 'classic' were Overburn's first names
             keep['burn'] = 0.0
         else:
             ob = o['overburn'] if isinstance(o.get('overburn'), bool) else o['glow'] if isinstance(o.get('glow'), bool) else (not o['classic']) if isinstance(o.get('classic'), bool) else None
@@ -994,13 +1006,26 @@ def beam_palette(bg, color, light=False):
 
 
 def _pool_start():
-    try:  # below the window's own thread, like the graphs' own threads
+    try:  # below the window's own thread
         ctypes.windll.kernel32.SetThreadPriority(ctypes.windll.kernel32.GetCurrentThread(), -1)
     except Exception:
         pass
 
 
 _POOL = None
+
+
+def stale(job, dt=0.0):
+    """marks a job of a graph thread that redraws its graph from the sound as it is now (it takes the time of the pictures that were dropped as a second argument): when several have piled up, only
+    the newest is run, so frames are dropped, not delayed.  dt: the time the job's own frame covers"""
+    job.stale_ok, job.dt = True, dt
+    return job
+
+
+def frame_gain(dt, tau):
+    """the share of a frame's light that keeps a graph that is drawn again from the same sound every frame as bright at any frame rate: such a graph builds up to 1 / (1 - exp(-dt / tau)) frames of light;
+    1 for a frame of 1/30 s"""
+    return (1.0 - math.exp(-dt / tau)) / (1.0 - math.exp(-(1.0 / 30.0) / tau))
 
 
 def pool_map(fn, items):
@@ -1025,24 +1050,26 @@ class BeamScreen:
         self.tau = self.TAU if tau is None else tau
         self.exposure = self.EXPOSURE if exposure is None else exposure
         self.buf = np.zeros((self.h, self.w), np.float32)
-        self.lift = 1.0  # below 1: the line itself is drawn bolder (see _lift_table); its glow stays as it is
+        self.lift = 1.0  # below 1: the line itself is drawn bolder (see _lift_table), its glow as it was
         self.wide = 0.0  # the gain of the wide glow (see wide_rows); 0: none
+        self.energy = 1.0  # a factor on the light of everything that is drawn
 
     def clear(self):
         self.buf[:] = 0.0
 
-    def add_path(self, xs, ys, dt, power=1.0, max_bits=64):
-        """the beam draws the path through the points (pixel positions, in time order) during dt seconds; the screen has faded for that long first"""
+    def add_path(self, xs, ys, dt, power=1.0, max_bits=64, scale=1.0, limit=120000):
+        """the beam draws the path through the points (pixel positions, in time order) during dt seconds; the screen has faded for that long first.  scale: the share of a sample's energy (1 / k when the
+        path has k times the usual number of samples)"""
         self.buf *= math.exp(-dt / self.tau)
         if len(xs) < 2:
             return
-        pts, w = beam_points(np.stack([np.asarray(xs, np.float64), np.asarray(ys, np.float64)], axis=1), power=power, max_bits=max_bits)
-        beam_splat(self.buf, pts, w)
+        pts, w = beam_points(np.stack([np.asarray(xs, np.float64), np.asarray(ys, np.float64)], axis=1), power=power, max_bits=max_bits, limit=limit)
+        beam_splat(self.buf, pts, w if scale == 1.0 and self.energy == 1.0 else w * (scale * self.energy))
 
-    def add(self, u, v, dt):
-        """u, v: consecutive samples of the left and right channel (-1 .. 1 is the whole screen), dt: the seconds they cover"""
+    def add(self, u, v, dt, scale=1.0, limit=120000):
+        """u, v: consecutive samples of the left and right channel (-1 .. 1 is the whole screen), dt: the seconds they cover; limit: the most bits of light the path is cut into"""
         hx, hy = (self.w - 1) / 2.0, (self.h - 1) / 2.0
-        self.add_path(hx * (1.0 + 0.96 * np.asarray(u, np.float64)), hy * (1.0 - 0.96 * np.asarray(v, np.float64)), dt)
+        self.add_path(hx * (1.0 + 0.96 * np.asarray(u, np.float64)), hy * (1.0 - 0.96 * np.asarray(v, np.float64)), dt, scale=scale, limit=limit)
 
     def render(self, lut, glow=1.0):
         """the screen as an RGB picture (glow: how strong the halo is, 0 for none)"""
@@ -1082,8 +1109,8 @@ class BeamScreen:
 
 _GAIN_TABLES = {}
 _LIFT_TABLES = {}
-WIDE_SIGMA = 20.0  # the width of the wide glow, in units of the screen's size relative to the first vectorscope (276 pixels); 78 pixels at 1080 high
-WIDE_GAIN = 4.0  # the gain of the wide glow for each 1.0 of Glow (a faint haze at 0.5, a clear one at 1.0)
+WIDE_SIGMA = 20.0  # the width of the wide glow, in units of the screen size relative to a 276 pixel vectorscope
+WIDE_GAIN = 4.0  # the gain of the wide glow per 1.0 of Glow
 
 
 def _blur_small(a, sigma):
@@ -1097,13 +1124,17 @@ def _blur_small(a, sigma):
     v = sum(kern[i] * p[i:i + h] for i in range(2 * r + 1))
     p = np.pad(v, ((0, 0), (r, r)))
     return sum(kern[i] * p[:, i:i + w] for i in range(2 * r + 1))
-STRENGTH_MIN, STRENGTH_MAX, STRENGTH_DEFAULT = 1, 10, 6  # 'Line strength': 1 (the beam's brightness as it is) to 10; each step lowers the exponent of _lift_table by 0.05 (6 is what Light was: 0.75, 9 what Strong was: 0.6)
-STRENGTH_LEGACY = {'Default': 1, 'Off': 1, 'Light': 6, 'Strong': 9}  # (the strength was a name before it was a number)
-BURN_MAX, BURN_LOW, BURN_HIGH = 3.0, 0.4, 1.0  # 'Phosphor': the glow of the beam, 0 (clean lines) to 3 in steps of 0.1 ('Glow', 0 to 3, is the broad faint one); a window starts on the low level or the high one (the old On and Overburn)
+STRENGTH_MIN, STRENGTH_MAX, STRENGTH_DEFAULT = 1, 10, 6  # 'Line strength': 1 (the beam's brightness as it is) to 10; each step lowers the exponent of _lift_table by 0.05
+STRENGTH_LEGACY = {'Default': 1, 'Off': 1, 'Light': 6, 'Strong': 9}  # what the strength was called before it was a number
+BURN_MAX, BURN_LOW, BURN_HIGH = 3.0, 0.4, 1.0  # 'Phosphor': the glow of the beam, 0 (clean lines) to 3 in steps of 0.1; a window starts on the low or the high level
 
 
 def strength_text(n):
     return str(n)
+
+
+def rate_text(n):
+    return 'Auto' if SCOPE_CHOICES[int(n)] == 0 else '%d kHz' % (SCOPE_CHOICES[int(n)] // 1000)
 
 
 def burn_text(n):
@@ -1153,13 +1184,13 @@ def plot_base(w, h, bg, grid, peak=None, rows=(), cols=(), bands=(), tint=None, 
 class BeamPlot:
     """a graph drawn like the vectorscope: a phosphor screen for each channel, added over a background picture (the grid) and shown as one picture.  Graphs wider than MAX_W are
     drawn smaller and enlarged, which keeps a big graph fast"""
-    MAX_W = 700
+    MAX_W = 1600
 
     clean = False
 
     def __init__(self, base, bg, colors, tau, exposure, power=1.0, max_bits=64, glow=1.0, blend='add', flat=False):
         self.h, self.w = base.shape[:2]
-        self.flat, self.bg_rgb, self.rgb_colors = flat, rgbtuple(bg), [rgbtuple(c) for c in colors]  # flat: no phosphor, the bars as plain areas (the levels, with the CRT look off)
+        self.flat, self.bg_rgb, self.rgb_colors = flat, rgbtuple(bg), [rgbtuple(c) for c in colors]  # flat: no phosphor, plain areas (the levels with the CRT look off)
         self.f = min(1.0, self.MAX_W / float(self.w))
         rw, rh = max(8, int(round(self.w * self.f))), max(8, int(round(self.h * self.f)))
         self.screens = [BeamScreen(rw, rh, tau, exposure) for _ in range(2)]
@@ -1167,18 +1198,18 @@ class BeamPlot:
         self.base = Image.fromarray(base, 'RGB')
         self.base_arr = np.ascontiguousarray(base)
         self.base_room = 255 - self.base_arr  # how much light each pixel can take before it is white
-        self.power, self.max_bits, self.glow, self.blend = power, max_bits, glow, blend  # blend: where the two channels overlap, 'add' their light (white-hot), keep the 'max' of the two (each keeps its colour) or 'white' (the max, turned white by how much of both there is)
+        self.power, self.max_bits, self.glow, self.blend = power, max_bits, glow, blend  # blend where the channels overlap: 'add' (white-hot), 'max' (each keeps its colour) or 'white' (the max, turned white by how much of both there is)
 
     def clear(self):
         for sc in self.screens:
             sc.clear()
 
-    def add(self, ch, xs, ys, dt):
-        """channel ch draws the path through the points (pixel positions in the graph) during dt seconds"""
-        self.screens[ch].add_path(np.asarray(xs, np.float64) * self.f, np.asarray(ys, np.float64) * self.f, dt, self.power, self.max_bits)
+    def add(self, ch, xs, ys, dt, scale=1.0, limit=120000):
+        """channel ch draws the path through the points (pixel positions in the graph) during dt seconds; limit: the most bits of light the path is cut into"""
+        self.screens[ch].add_path(np.asarray(xs, np.float64) * self.f, np.asarray(ys, np.float64) * self.f, dt, self.power, self.max_bits, scale, limit)
 
     def image(self):
-        if self.flat:  # plain areas: the fill in a darker shade, the bright edges and the hold line in the colour, no glow
+        if self.flat:  # plain areas: a darker fill, bright edges and hold line in the colour, no glow
             out = np.array(self.base)
             for sc, col in zip(self.screens, self.rgb_colors):
                 a = sc.buf
@@ -1220,13 +1251,13 @@ class BeamPlot:
         r0 -= r0 % 4
         r1 = min(rh, (min(rh, int(math.ceil(y1 * fy)) + pad) + 3) // 4 * 4)
         job = lambda a: a[0].render_rows(r0, r1, a[1], self.glow, k)
-        if (r1 - r0) * rw >= 150000:  # the two channels at once
+        if (r1 - r0) * rw >= 150000:  # big enough to build the two channels on two threads
             ims = pool_map(job, list(zip(self.screens, self.luts)))
         else:
             ims = [job(a) for a in zip(self.screens, self.luts)]
         if self.blend == 'max':
             light = ImageChops.lighter(ims[0], ims[1])
-        elif self.blend == 'white':  # each channel keeps its colour; where both are lit the light turns white, by as much as the weaker of the two is there
+        elif self.blend == 'white':  # each channel keeps its colour; where both are lit the light turns white
             light = ImageChops.lighter(ims[0], ims[1])
             both = ImageChops.darker(ims[0].convert('L'), ims[1].convert('L')).point(_gain_table(1.5))
             light = ImageChops.screen(light, Image.merge('RGB', (both, both, both)))
@@ -1251,13 +1282,19 @@ class BeamPlot:
         return Image.fromarray(out, 'RGB')
 
 
+VEC_MAX = 1000  # the largest phosphor screen of the vectorscope (a bigger panel shows it enlarged)
+
+
 class BeamVector:
     """the vectorscope's screen with its palette: the new samples go in, a picture `side` pixels wide comes out"""
     clean = False
 
-    def __init__(self, size, side, lut, glow=1.0):
+    def __init__(self, size, side, lut, glow=1.0, ref=None):
         self.screen = BeamScreen(size)
         self.side, self.lut, self.glow = side, lut, glow
+        ratio = size / float(ref) if ref else 1.0  # how much bigger the screen is than in the normal layout: the same light on a line that is that much longer is dimmer, so it gets more
+        if ratio > 1.0:  # (more than in proportion: measured, this keeps the lines as bright and white-hot as in the normal layout)
+            self.screen.energy = min(8.0, ratio ** 1.5)
 
     def image(self):
         img = self.screen.render(self.lut, self.glow)
@@ -1274,7 +1311,7 @@ class CleanScreen:
     def clear(self):
         self.u = self.v = None
 
-    def add(self, u, v, dt):
+    def add(self, u, v, dt, scale=1.0, limit=None):
         if len(u) > 1:
             self.u, self.v = np.asarray(u, np.float64), np.asarray(v, np.float64)
 
@@ -1318,7 +1355,7 @@ class CleanPlot:
     def clear(self):
         self.lines = [[], []]
 
-    def add(self, ch, xs, ys, dt):
+    def add(self, ch, xs, ys, dt, scale=1.0, limit=None):
         if ch == 0 and dt > 0:  # the first line of a new frame: what was drawn before is gone
             self.clear()
         self.lines[ch].append((np.asarray(xs, np.float64), np.asarray(ys, np.float64)))
@@ -1360,8 +1397,8 @@ class BeamWorker:
     def __init__(self, plot, threaded=True, banded=False):
         self.plot, self.threaded = plot, threaded
         self.image, self.seq, self.taken, self.error = None, 0, 0, None
-        # banded: only the rows of the picture that differ from the plain background are made and handed over (band = their first row and one past the last; the window shows them as a little
-        # picture on top of the background, which is on screen once).  A graph has light in some of its rows only
+        # banded: only the rows that differ from the plain background are made and handed over (band = first row, one past the last row);
+        # the window shows them as a small picture on the background, which is on screen once
         self.banded = banded and hasattr(plot, 'image_rows') and not getattr(plot, 'flat', False)
         self.band, self.last_band, self.fresh = None, None, False
         self.lock = threading.Lock()
@@ -1406,9 +1443,13 @@ class BeamWorker:
                 pass
             if None in batch:
                 return
+            extra = 0.0
+            if all(getattr(j, 'stale_ok', False) for j in batch):
+                extra = sum(j.dt for j in batch[:-1])  # (these redraw the graph from the sound as it is now: the ones that piled up while the last picture was made are not needed; the time they covered is the newest one's to fade by)
+                batch = batch[-1:]
             try:
                 for j in batch:
-                    j(self.plot)
+                    j(self.plot, extra) if getattr(j, 'stale_ok', False) else j(self.plot)
                 self._draw()
             except Exception:
                 self.error = traceback.format_exc()
@@ -1431,8 +1472,8 @@ class BeamWorker:
 
 class Theme:
     """the colours of the window: a background, one colour for each channel (the lighter one is the left channel, the darker one the right) and a tint for the text; the rest is blended from those"""
-    def __init__(self, name, bg, left, right, lname, rname, tint='#b8c4cc', accent='#4a90d9', vec=None, a=None, b=None, mark=None, on=None, spec=None, glow=True, good=None, live=None, peak=None):
-        self.name, self.bg, self.left, self.right, self.lname, self.rname = name, bg, left, right, lname, rname
+    def __init__(self, name, bg, left, right, tint='#b8c4cc', accent='#4a90d9', vec=None, a=None, b=None, mark=None, on=None, spec=None, glow=True, good=None, live=None, peak=None):
+        self.name, self.bg, self.left, self.right = name, bg, left, right
         self.txt = tint
         self.fg = mix(tint, '#ffffff', 0.65)
         self.grid = mix(bg, tint, 0.17)
@@ -1463,21 +1504,20 @@ class Theme:
 
 
 THEMES = [
-    Theme('Classic', '#101418', '#ffd23f', '#ff5a4d', 'yellow', 'red', vec='#57e0a8', a='#ff8a7d', b='#7fd0ff', mark=('#ffb347', '#7fd0ff'), on='#2a6a8f', glow=False, good='#57e0a8', live='#7bd88f', peak='#ff4040'),
-    Theme('Green phosphor', '#030b06', '#c4ffd6', '#2bff70', 'pale green', 'green', tint='#8fe8ad', accent='#27c45f', spec='#2bff70', vec='#2bff70', peak=mix('#2bff70', '#ffffff', 0.45), a='#2bff70', b='#c4ffd6'),
-    Theme('Amber phosphor', '#0c0702', '#ffe6a8', '#ffa31a', 'pale amber', 'amber', tint='#f0c070', accent='#d98a14', spec='#ffa31a', vec='#ffa31a', peak=mix('#ffa31a', '#ffffff', 0.45), a='#ffa31a', b='#ffe6a8'),
-    Theme('Blue phosphor', '#030812', '#c4e6ff', '#3aa8ff', 'ice', 'blue', tint='#8fc4f0', accent='#2f86e0', spec='#3aa8ff', vec='#3aa8ff', peak=mix('#3aa8ff', '#ffffff', 0.45), a='#3aa8ff', b='#c4e6ff'),
-    Theme('Red phosphor', '#0d0405', '#ffc2bd', '#ff3b30', 'pink', 'red', tint='#f09890', accent='#d6332b', spec='#ff3b30', vec='#ff3b30', peak=mix('#ff3b30', '#ffffff', 0.45), a='#ff3b30', b='#ffc2bd'),
-    Theme('Orange + blue', '#07090d', '#2fb5ff', '#ff8a1f', 'blue', 'orange', spec='#ff8a1f', vec='#ff8a1f', peak=mix('#ff8a1f', '#ffffff', 0.45), a='#ff8a1f', b='#2fb5ff'),
-    Theme('Green + magenta', '#06080b', '#39ff6a', '#ff3df0', 'green', 'magenta', spec='#39ff6a'),
-    Theme('Red + cyan', '#08090c', '#2ff0e8', '#ff4a3d', 'cyan', 'red', spec='#ff4a3d', vec='#ff4a3d', peak=mix('#ff4a3d', '#ffffff', 0.45), a='#ff4a3d', b='#2ff0e8'),
+    Theme('Classic', '#101418', '#ffd23f', '#ff5a4d', vec='#57e0a8', a='#ff8a7d', b='#7fd0ff', mark=('#ffb347', '#7fd0ff'), on='#2a6a8f', glow=False, good='#57e0a8', live='#7bd88f', peak='#ff4040'),
+    Theme('Green phosphor', '#030b06', '#c4ffd6', '#2bff70', tint='#8fe8ad', accent='#27c45f', spec='#2bff70', vec='#2bff70', peak=mix('#2bff70', '#ffffff', 0.45), a='#2bff70', b='#c4ffd6'),
+    Theme('Amber phosphor', '#0c0702', '#ffe6a8', '#ffa31a', tint='#f0c070', accent='#d98a14', spec='#ffa31a', vec='#ffa31a', peak=mix('#ffa31a', '#ffffff', 0.45), a='#ffa31a', b='#ffe6a8'),
+    Theme('Blue phosphor', '#030812', '#c4e6ff', '#3aa8ff', tint='#8fc4f0', accent='#2f86e0', spec='#3aa8ff', vec='#3aa8ff', peak=mix('#3aa8ff', '#ffffff', 0.45), a='#3aa8ff', b='#c4e6ff'),
+    Theme('Red phosphor', '#0d0405', '#ffc2bd', '#ff3b30', tint='#f09890', accent='#d6332b', spec='#ff3b30', vec='#ff3b30', peak=mix('#ff3b30', '#ffffff', 0.45), a='#ff3b30', b='#ffc2bd'),
+    Theme('Orange + blue', '#07090d', '#2fb5ff', '#ff8a1f', spec='#ff8a1f', vec='#ff8a1f', peak=mix('#ff8a1f', '#ffffff', 0.45), a='#ff8a1f', b='#2fb5ff'),
+    Theme('Green + magenta', '#06080b', '#39ff6a', '#ff3df0', spec='#39ff6a'),
+    Theme('Red + cyan', '#08090c', '#2ff0e8', '#ff4a3d', spec='#ff4a3d', vec='#ff4a3d', peak=mix('#ff4a3d', '#ffffff', 0.45), a='#ff4a3d', b='#2ff0e8'),
 ]
 
 
 # ---------------------------------------------------------------- undoing a system equaliser (Equalizer APO)
-# Windows loopback records the sound after the audio engine's stream effects, so an equaliser such as Equalizer APO is IN what the scope hears.  A headphone correction curve is full of
-# phase shifts, and the pictures of oscilloscope music (which depend on every frequency arriving on time) come out bent.  The parametric filters in the Equalizer APO configuration
-# of the output are read here and undone with their exact inverse (every peaking and shelf filter is minimum phase, so the inverse is stable).
+# Windows loopback records the sound after the audio engine's stream effects, so an equaliser such as Equalizer APO is in what the scope hears, and a headphone correction's phase shifts bend oscilloscope music.
+# The parametric filters of the output's Equalizer APO configuration are read here and undone with their exact inverse (every peaking and shelf filter is minimum phase, so the inverse is stable).
 EQ_UNDOABLE = ('PK', 'PEQ', 'LSC', 'HSC')
 
 
@@ -1541,6 +1581,29 @@ class StreamFir:
         x = np.concatenate([self.hist, np.asarray(blk, dtype=np.float64)], axis=0)
         self.hist = x[len(x) - self.keep:]
         return np.stack([self.fir.valid(x[:, c]) for c in range(x.shape[1])], axis=1).astype(np.float32)
+
+
+def auto_scope_rate(mix_rate):
+    """the Scope rate that Auto picks for an output Windows mixes at mix_rate (None when it is not known): the highest of 48, 96 and 192 kHz that the output really carries"""
+    if not mix_rate:
+        return SR
+    return 192000 if mix_rate >= 176400 else 96000 if mix_rate >= 88200 else SR
+
+
+class StreamDecimator:
+    """the 48 kHz stream out of one at k times that rate, block after block: a linear-phase low-pass (flat to 21 kHz, 80 dB down from 24 kHz) and every k-th sample.  `delay` is how many input
+    samples the output lags behind (the middle of the filter); a block has to be a multiple of k long"""
+
+    def __init__(self, k, rate):
+        n = int((80 - 7.95) / (14.36 * (3000.0 / rate))) | 1
+        t = np.arange(n) - (n - 1) / 2.0
+        fc = 21000.0 / rate
+        h = 2 * fc * np.sinc(2 * fc * t) * np.kaiser(n, 7.86)
+        self.k, self.delay = int(k), (n - 1) // 2
+        self.fir = StreamFir(h / h.sum())
+
+    def process(self, blk):
+        return self.fir.process(blk)[::self.k]
 
 
 def eq_device_match(selector, endpoint_id, endpoint_name):
@@ -1641,7 +1704,7 @@ def endpoint_mix_rate(endpoint_id):
         return 48000
 
 
-def eq_undo_for(endpoint_id, endpoint_name, config_dir=None, mix_rate=None):
+def eq_undo_for(endpoint_id, endpoint_name, config_dir=None, mix_rate=None, out_rate=SR):
     """-> (StreamFir or None, what to say, [(file, modification time)]): the filter that undoes the Equalizer APO equaliser on this output.  Nothing is undone when the equaliser uses
     anything that is not a peaking or shelf filter (the sound would only be half corrected)"""
     cdir = config_dir or eqapo_config_dir()
@@ -1654,7 +1717,7 @@ def eq_undo_for(endpoint_id, endpoint_name, config_dir=None, mix_rate=None):
     if out['unsupported']:
         return None, 'Equalizer APO is in the sound (%s: not undone)' % ', '.join(sorted(set(out['unsupported']))[:3]), out['files']
     rate = mix_rate or endpoint_mix_rate(endpoint_id)
-    return StreamFir(eq_inverse_fir(out['preamp'], out['filters'], rate)), 'Equalizer APO undone', out['files']
+    return StreamFir(eq_inverse_fir(out['preamp'], out['filters'], rate, out_rate=out_rate, taps=4096 * max(1, int(out_rate) // SR))), 'Equalizer APO undone', out['files']
 
 
 def fmt_time(t, fine=False):
@@ -1717,7 +1780,7 @@ class Clip:
         self.peak = float(np.abs(self.data).max()) if len(self.data) else 0.0
         self._ms = None
         self._sg = None
-        self._int = {}
+        self._int = False  # (not worked out yet)
         self.findings = None  # set by find_problems
 
     @property
@@ -1736,11 +1799,10 @@ class Clip:
             self._sg = sg_full(self.data.astype(np.float64).mean(axis=1))
         return self._sg
 
-    def integrated(self, offset_db=0.0):
-        k = round(offset_db, 2)
-        if k not in self._int:
-            self._int[k] = integrated(self.ms, offset_db)
-        return self._int[k]
+    def integrated(self):
+        if self._int is False:
+            self._int = integrated(self.ms)
+        return self._int
 
     def meta(self):
         return {'vol_db': self.vol_db, 'markers': self.markers, 'sel': self.sel, 'saved': time.strftime('%Y-%m-%d %H:%M:%S')}
@@ -1775,7 +1837,7 @@ class Clip:
         if x.ndim == 1:
             x = np.stack([x, x], axis=1)
         if sr != SR:
-            x = resample_poly(x, SR, sr, axis=0).astype(np.float32)
+            x = resample_poly(x, SR, sr).astype(np.float32)
         meta = {}
         side = os.path.splitext(path)[0] + '.json'
         if os.path.exists(side):
@@ -1793,6 +1855,9 @@ class Capture(threading.Thread):
         super().__init__(daemon=True)
         self.ring = np.zeros((SR * 2, 2), np.float32)
         self.pos = 0
+        self.hi_rate = 0  # what the Scope rate asks for: 0 = Auto (the rate Windows mixes the output at) or 48000, 96000, 192000; the capture reads at it and makes the 48 kHz stream from it
+        self.mix_rate = None  # the rate Windows mixes the open output at (a loopback): what can arrive at most
+        self.hk, self.hdelay, self.hring, self.hpos = 1, 0, None, 0  # the factor in use, the delay of the decimator, the 2 s ring of the fast stream and how far it has been written
         self.lock = threading.Lock()
         self.hist = deque(maxlen=HIST_BLOCKS + 100)  # (peak L, peak R) per 10 ms block: the 30 s that are shown and a little more
         self.ms = []  # K-weighted energy per 10 ms block since the last reset (for LUFS)
@@ -1816,7 +1881,8 @@ class Capture(threading.Thread):
         self.undo_eq = True  # undo a system equaliser (Equalizer APO) in the output's audio path
         self.eq_note = ''  # what to tell about it
 
-    def push(self, blk):
+    def push(self, blk, hi=None):
+        """blk: the next 10 ms at 48 kHz; hi: the same 10 ms at the faster rate (k times as many frames), when the scopes draw from it"""
         n = len(blk)
         pk = np.abs(blk).max(axis=0)
         fl = block_flags(blk)
@@ -1830,6 +1896,16 @@ class Capture(threading.Thread):
                 self.ring[i:] = blk[:k]
                 self.ring[:n - k] = blk[k:]
             self.pos += n
+            if hi is not None and self.hring is not None:
+                m = len(hi)
+                j = self.hpos % len(self.hring)
+                if j + m <= len(self.hring):
+                    self.hring[j:j + m] = hi
+                else:
+                    q = len(self.hring) - j
+                    self.hring[j:] = hi[:q]
+                    self.hring[:m - q] = hi[q:]
+                self.hpos += m
             self.hist.append((float(pk[0]), float(pk[1])))
             self.ms.append(e)
             for c in (0, 1):
@@ -1850,6 +1926,22 @@ class Capture(threading.Thread):
         with self.lock:
             idx = (np.arange(end - n, end) % len(self.ring))
             return self.ring[idx].copy()
+
+    def hi_window(self, end, n):
+        """the n samples (at 48 kHz) that end at position `end`, as the faster stream had them: (frames, k) with k times n frames; k is 1 (and the frames are the 48 kHz ones) when the scope rate is 48 kHz"""
+        with self.lock:
+            k = self.hk
+            if k <= 1 or self.hring is None:
+                return self.ring[np.arange(end - n, end) % len(self.ring)].copy(), 1
+            a = (end - n) * k - self.hdelay  # (the filter's middle is `delay` samples back: the 48 kHz sample j is the fast stream at j * k - delay)
+            return self.hring[np.arange(a, a + n * k) % len(self.hring)].copy(), k
+
+    def set_hi_rate(self, rate):
+        self.hi_rate = rate if rate in SCOPE_CHOICES else SR
+
+    def chosen_rate(self):
+        """the rate the capture reads at now: the one asked for, or for Auto the one the open output delivers"""
+        return auto_scope_rate(self.mix_rate) if self.hi_rate == 0 else self.hi_rate
 
     def reset(self):
         with self.lock:
@@ -1935,6 +2027,12 @@ class Capture(threading.Thread):
                 self.warn = ''
                 self.device = label
                 self.now = want
+                self.mix_rate = None
+                if loop and WINDOWS:
+                    try:
+                        self.mix_rate = int(endpoint_mix_rate(opened))
+                    except Exception:
+                        self.mix_rate = None
                 ev = None
                 if loop:
                     try:
@@ -1947,24 +2045,35 @@ class Capture(threading.Thread):
                 self.eq_note = ''
                 try:
                     ch = 2 if getattr(mic, 'channels', 2) >= 2 else 1
-                    with mic.recorder(samplerate=SR, channels=ch, blocksize=BLOCK) as rec:
+                    req = self.hi_rate
+                    hi_rate = self.chosen_rate()
+                    kr = max(1, hi_rate // SR)  # read at kr times SR; the 48 kHz stream is made from it here
+                    dec = StreamDecimator(kr, SR * kr) if kr > 1 else None
+                    with self.lock:
+                        self.hk, self.hdelay = kr, (dec.delay if dec else 0)
+                        self.hring = np.zeros((SR * kr * 2, 2), np.float32) if kr > 1 else None
+                        self.hpos = self.pos * kr
+                    with mic.recorder(samplerate=SR * kr, channels=ch, blocksize=BLOCK * kr) as rec:
                         k = 0
-                        while not self.stop and self.want == want:
-                            blk = np.asarray(rec.record(numframes=BLOCK), dtype=np.float32)
+                        while not self.stop and self.want == want and self.hi_rate == req:
+                            blk = np.asarray(rec.record(numframes=BLOCK * kr), dtype=np.float32)
                             if blk.ndim == 1:
                                 blk = blk[:, None]
                             if blk.shape[1] == 1:
                                 blk = np.repeat(blk, 2, axis=1)
                             blk = blk[:, :2]
                             if loop and (eq_key is None or (k % 100 == 0 and eq_key[1] != [os.path.getmtime(f_) if os.path.exists(f_) else 0 for f_, _ in eq_key[2]]) or eq_key[0] != self.undo_eq):
-                                eq_fir, eq_note, eq_files = eq_undo_for(opened, label)  # (again when the equaliser's files have changed, or the switch has been used)
+                                eq_fir, eq_note, eq_files = eq_undo_for(opened, label, out_rate=SR * kr)  # (again when the equaliser's files have changed, or the switch has been used)
                                 eq_key = (self.undo_eq, [t_ for _, t_ in eq_files], eq_files)
                                 if not self.undo_eq:
                                     eq_fir, eq_note = None, ('Equalizer APO is in the sound (U undoes it)' if eq_note else '')
                                 self.eq_note = eq_note
                             if eq_fir is not None:
                                 blk = eq_fir.process(blk)
-                            self.push(blk)
+                            hi = blk if dec is not None else None
+                            if dec is not None:
+                                blk = dec.process(blk)
+                            self.push(blk, hi)
                             k += 1
                             if ev is not None and k % 50 == 1:
                                 try:
@@ -1977,6 +2086,12 @@ class Capture(threading.Thread):
                                     self.list_devices(sc)
                                 if want[0] == 'default' and (sc.default_speaker() if WINDOWS else sc.default_microphone()).id != opened:  # the system default changed: follow it
                                     break
+                                if req == 0 and loop and WINDOWS:  # Auto: the output's format was changed in Windows
+                                    try:
+                                        if auto_scope_rate(int(endpoint_mix_rate(opened))) != hi_rate:
+                                            break
+                                    except Exception:
+                                        pass
                 except Exception as e:
                     self.warn = 'input error: %s' % str(e)[:60]
                     time.sleep(1.0)
@@ -2143,19 +2258,23 @@ class FlatButton(tk.Label):
             self._command()
 
 
+def cfg(w, **kw):
+    """w.config(**kw) for what differs from what the widget has: Tk redraws a widget it is asked to configure, even when nothing changes"""
+    diff = {k: v for k, v in kw.items() if str(w.cget(k)) != str(v)}
+    if diff:
+        w.config(**diff)
+
+
 def Button(master, **kw):
     return (FlatButton if FLAT_BUTTONS else tk.Button)(master, **kw)
 
 
 class PanelMenu:
-    """the right-click menu of a window: a small popup of our own, because a Windows menu cannot hold clickable arrows.  Its rows: a heading, commands (a tick or nothing to the left of the words),
-    steppers (a value with an arrow either side: click the arrows, hold them to run, scroll, or press Left / Right on the highlighted row; the menu stays open and the graph changes while you
-    step) and separators.  Up / Down move the highlight, Return does a command, Home / End take a stepper to its ends, Escape or a click outside closes it.  For the tests it answers the calls
-    of a tk.Menu (type, entrycget, index, invoke) and steps without being on screen"""
+    """the right-click menu of a window: a small popup of our own, because a Windows menu cannot hold clickable arrows.  Its rows: a heading, commands (a tick or nothing left of the words), steppers (a value with an arrow either side: click the arrows, hold them to run, scroll, or press Left / Right on the highlighted row; the menu stays open and the graph changes while you step) and separators.  Up / Down move the highlight, Return does a command, Home / End take a stepper to its ends, Escape or a click outside closes it"""
     HIDDEN = False  # the tests show it completely transparent
 
     def __init__(self, app, tick, blank):
-        self.app, self.tick, self.blank = app, tick, blank
+        self.app, self.tick = app, tick
         self._marks, self._on = (tick, blank), ()
         self.entries = []
         self.top = self.cv = None
@@ -2164,7 +2283,7 @@ class PanelMenu:
         self.width = self.height = 0
         self._after, self._held, self.unsaved = None, None, False
 
-    # ---- building and the calls of a tk.Menu
+    # ---- building
     def add_heading(self, label):
         self.entries.append(dict(kind='command', heading=True, label=label, image=None, command=None))
 
@@ -2177,19 +2296,6 @@ class PanelMenu:
     def add_stepper(self, label, n, n_max, text, change, visible=None, n_min=0):
         """a value n_min to n_max, shown as text(n); change(n, save=True) is called with every new value; visible: a function that says whether the row is there"""
         self.entries.append(dict(kind='stepper', label=label, n=n, n_min=n_min, n_max=n_max, text=text, change=change, visible=visible))
-
-    def index(self, what):
-        return len(self.entries) - 1 if what == 'end' else int(what)
-
-    def type(self, i):
-        return self.entries[i]['kind']
-
-    def entrycget(self, i, opt):
-        e = self.entries[i]
-        th = self.app.th
-        got = {'label': e.get('label', ''), 'image': str(e['image']) if e.get('image') is not None else '', 'compound': 'left', 'state': 'normal',
-               'foreground': th.accent_hi if e.get('heading') else th.fg, 'font': '{Segoe UI} 9 bold' if e.get('heading') else '{Segoe UI} 9'}
-        return got[opt]
 
     def stepper(self, label):
         return next(e for e in self.entries if e['kind'] == 'stepper' and e['label'] == label)
@@ -2330,7 +2436,7 @@ class PanelMenu:
         return None, x, y
 
     def on_motion(self, ev):
-        row, x, y = self.at(ev)
+        row = self.at(ev)[0]
         e = row[0] if row else None
         if e is not self.hover:
             self.hover = e
@@ -2384,7 +2490,7 @@ class PanelMenu:
             self.draw()
 
     def on_wheel(self, ev):
-        row, x, y = self.at(ev)
+        row = self.at(ev)[0]
         if row and row[0]['kind'] == 'stepper':
             self.step(self.entries.index(row[0]), 1 if ev.delta > 0 else -1)
 
@@ -2425,7 +2531,7 @@ class App:
     """the main window: a scope canvas, button rows and a timeline canvas; modes live | rec | review | compare; everything scales with self.k"""
     BASE_W, BASE_H, BASE_TH = 1240, 672, 188
     THREADED = True  # the graphs are drawn on threads of their own (the tests switch it off)
-    HIST_OFFSETS = (-0.6, 0.0, 0.6)  # vertical offsets (pixels) the level history's line is drawn at: three passes a fraction of a pixel apart make a more solid line
+    HIST_OFFSETS = (-0.6, 0.0, 0.6)  # vertical offsets (pixels) of the level history's line: three passes a fraction of a pixel apart make it more solid
     NUDGES = [('-1s', -1.0), ('-100ms', -0.1), ('-10ms', -0.01), ('-1ms', -0.001), ('+1ms', 0.001), ('+10ms', 0.01), ('+100ms', 0.1), ('+1s', 1.0)]
 
     def __init__(self, root, cap):
@@ -2433,15 +2539,16 @@ class App:
         s = self.load_settings()
         self.paused = False
         self.gain = 1.0  # the scope's gain follows the sound by itself
-        self.comp = False  # levels are shown as measured; the C key ignores the Windows volume until the program is closed
         self.spec_mode = s.get('spec_mode', 'spectrum')
         self.popup = None  # the open menu of a window (see PanelMenu)
-        self.panel_opts = clean_panel_opts(s.get('panels'))  # what was chosen for each window with a right click
+        self.panel_opts = clean_panel_opts(s.get('panels'))
         self.hold = [FLOOR, FLOOR]
         self.hold_t = [0.0, 0.0]
         self.bal_lv = [FLOOR, FLOOR]  # the levels the balance bars show (dB)
         self.beam, self.vec_last, self.vec_lut = None, None, None  # the vectorscope's screen, where it has drawn up to and its palette
-        self.work_ms = 0.0  # how long a frame takes to draw, smoothed: a slow computer draws the oscilloscope every other frame instead of falling behind
+        self.work_ms = 0.0  # how long a frame takes to draw (smoothed)
+        self.fps = FPS_MIN  # frames a second, between FPS_MIN and FPS_MAX (see auto_frame_rate)
+        self.fps_checked = time.perf_counter()  # when auto_frame_rate last looked
         self.plots, self.photos, self.plot_pos, self.plot_time = {}, {}, {}, {}  # the other graphs' phosphor screens (made when first drawn), their pictures, where they have drawn up to and when
         self.osc_pts = self.spec_pts = self.hist_pts = None  # what the graphs drew last, as canvas coordinates (one (xs, ys) per channel)
         self.mode = 'live'  # live | rec | review | compare
@@ -2458,7 +2565,6 @@ class App:
         self.drag = None
         self.sg_cols = deque(maxlen=2000)
         self.sg_pos = 0
-        self.sg_photo = None
         self.theme_i = next((i for i, t in enumerate(THEMES) if t.name == s.get('theme', DEFAULT_THEME)), 0)
         self.use_theme()
         self.frame = 0
@@ -2504,9 +2610,10 @@ class App:
         src = s.get('source')
         if src:
             cap.set_source(src[0], src[1])
+        cap.set_hi_rate(s.get('scope_rate') if isinstance(s.get('scope_rate'), int) else 0)
         root.protocol('WM_DELETE_WINDOW', self.quit)
         root.bind('<Configure>', self.on_configure)
-        self.fit_window()  # the scope's width and the height of what shows
+        self.fit_window()
         self.style_titlebar()
         root.after(300, self.style_titlebar)  # again once the window is on screen
         self.tick()
@@ -2523,7 +2630,7 @@ class App:
             os.makedirs(os.path.dirname(SETTINGS), exist_ok=True)
             self.root.update_idletasks()
             json.dump({'w': self.root.winfo_width(), 'h': self.root.winfo_height(), 'x': self.root.winfo_x(), 'y': self.root.winfo_y(), 'k': self.k,
-                       'spec_mode': self.spec_mode, 'theme': self.th.name, 'loop': self.player.loop, 'last_dir': self.last_dir, 'source': list(self.cap.want), 'panels': self.panel_opts}, open(SETTINGS, 'w'))
+                       'spec_mode': self.spec_mode, 'theme': self.th.name, 'loop': self.player.loop, 'last_dir': self.last_dir, 'source': list(self.cap.want), 'scope_rate': self.cap.hi_rate, 'panels': self.panel_opts}, open(SETTINGS, 'w'))
         except Exception:
             pass
 
@@ -2592,13 +2699,12 @@ class App:
     def build_ui(self):
         for w in self.root.winfo_children():
             w.destroy()
-        S = self.S
         self.CW, self.CH, self.TH = self.canvas_size()
         self.c = tk.Canvas(self.root, width=self.CW, height=self.CH, bg=self.BG, highlightthickness=0)
         self.c.pack()
-        self.c.bind('<Button-1>', self.scope_press)  # a single click does nothing: it takes a double click (counted here, see scope_press) to enlarge a scope or to go back
+        self.c.bind('<Button-1>', self.scope_press)  # a single click does nothing: a double click (counted in scope_press) enlarges a scope or goes back
         self.c.bind('<Motion>', self.scope_motion)
-        self.c.bind('<Button-3>', self.panel_menu)  # a right click on a window: its grid, its light levels, its colours
+        self.c.bind('<Button-3>', self.panel_menu)
         if MACOS:
             self.c.bind('<Button-2>', self.panel_menu)
             self.c.bind('<Control-Button-1>', self.panel_menu)
@@ -2610,7 +2716,6 @@ class App:
         self.build_timeline()
         self.tl_key = None
         self.hist_key = None
-        self.sg_photo = None
         self.stop_plots()
         self._rows = None
         self.set_spec_mode(self.spec_mode)
@@ -2623,7 +2728,7 @@ class App:
         base = dict(osc=(10, 44, 610, 320), vec=(625, 44, 901, 320), met=(916, 44, 1230, 320), spec=(10, 352, 610, 630), hist=(625, 352, 1230, 630))
         zoom = self.zoom
         CW, CH = self.CW, self.CH
-        # a zoomed panel fills the canvas (the whole window) with a small margin, or edge to edge when its grid and its info are both off; the vectorscope stays square; the spectrum leaves room for its range names
+        # a zoomed panel fills the canvas with a small margin (edge to edge when its grid and info are off); the vectorscope stays square and the spectrum leaves room for its range names
         m_ = S(8) if (zoom is None or self.panel_grid(zoom) or self.panel_info(zoom)) else 0
         side = min(CW, CH) - 2 * m_
         self.mz = 1.0
@@ -2642,8 +2747,7 @@ class App:
         for n_, (x0, y0, x1, y1) in self.P.items():
             if self.panel_border(n_):  # (the border only goes when a window fills the whole window and its grid is off)
                 c.create_rectangle(x0, y0, x1, y1, outline=self.GRID)
-        # the spectrum and the level history keep their dB numbers in a column at the left of the frame; the graphs start after it, so no trace runs through a number.
-        # Both frames end on the lowest dB line, so a silent channel is a line at the same height in both.  self.P then holds the graph itself
+        # the spectrum and the level history keep their dB numbers in a column at the left of the frame, so no trace runs through a number; both frames end on the lowest dB line.  self.P then holds the graph itself
         self.gutters = {n: (S(46) if self.panel_info(n) else 0) for n in ('spec', 'hist')}  # with its info off a window has no numbers and so no column for them
         self.panel_frame = {n: self.P[n] for n in ('spec', 'hist')}
         for n, (x0, y0, x1, y1) in self.panel_frame.items():
@@ -2655,7 +2759,6 @@ class App:
             return c.create_text(S(x) + (away if out else 0), S(y), text=s, fill=k.pop('fill', self.TXT), font=self.F(k.pop('size', 9)), anchor=k.pop('anchor', 'nw'), **k)
         self.status = t(10, 8, '', zoom is not None, size=10)
         shown = lambda n: 'normal' if self.panel_info(n) else 'hidden'  # a window's text and numbers can be turned off (right-click it)
-        self.dc_txt = t(985, 28, '', zoom is not None, state=shown('met'))
         t(10, 28, 'OSCILLOSCOPE', zoom is not None, state=shown('osc'))  # no list of the channel colours: every window can have its own
         t(625, 28, 'VECTORSCOPE', zoom is not None, state=shown('vec'))
         t(916, 28, 'LEVELS', zoom is not None, state=shown('met'))
@@ -2676,7 +2779,7 @@ class App:
         if self.panel_info('vec'):
             c.create_text(x1 - S(4), cy + S(3), text='L', fill=self.CL, font=self.F(9), anchor='ne')
             c.create_text(cx + S(4), y0 + S(3), text='R', fill=self.CR, font=self.F(9), anchor='nw')
-        # meters: positions are in the units of the normal layout; out of sight while another scope fills the area, and bigger (self.mz) when they fill the window themselves
+        # meters: positions are in the units of the normal layout; out of sight while another scope fills the area, bigger (self.mz) when they fill the window
         x0, y0, x1, y1 = self.P['met']
         mx = away if (zoom is not None and zoom != 'met') else 0
         ms = self.ms
@@ -2691,13 +2794,13 @@ class App:
         self.met_geom = None
         nfont = tkfont.Font(root=self.root, font=FM(8))
         wm, w2 = nfont.measure('-'), nfont.measure('48')
-        col_x = self.bal_x - (wm + w2) / 2.0 + wm  # the first digit of every number of the dB scale starts here (the 0, the 6 of -6, the 1 of -12 ...), the minus signs hang to its left
+        col_x = self.bal_x - (wm + w2) / 2.0 + wm  # the first digit of every dB number starts here (the 0, the 6 of -6, the 1 of -12 ...); the minus signs hang to its left
         GAP_SHIFT = {-12: 2, -24: 3, -48: 2}  # pixels at scale 1: measured on the drawn digits (the 1, 2 and 4 have different side gaps)
         for dd in (0, -6, -12, -24, -48):  # each number sits on its line, which runs out to the bars on both sides of it
             yy = y0 + ms(20) + (-dd) / 60.0 * self.bar_h
             col = self.th.peak if dd == 0 else self.GRID
             digits = str(abs(dd))
-            lx = col_x - ms(GAP_SHIFT.get(dd, 0))  # the two-digit numbers sit a hair to the left, so the gap between their two digits is on the balance bar's centre line
+            lx = col_x - ms(GAP_SHIFT.get(dd, 0))  # the two-digit numbers sit a hair left, so the gap between their digits is on the balance bar's centre line
             if self.panel_grid('met'):
                 c.create_line(self.bar_xs[0] + ms(54), yy, lx - ms(3) - (wm if dd < 0 else 0), yy, fill=col)  # the 0 has no minus sign, so its line runs on to the digit
                 c.create_line(lx + nfont.measure(digits) + ms(3), yy, self.bar_xs[1] - ms(4), yy, fill=col)
@@ -2705,23 +2808,26 @@ class App:
                 c.create_text(lx, yy, text=digits, fill=(self.th.peak if dd == 0 else self.TXT), font=FM(8), anchor='w')
                 if dd < 0:
                     c.create_text(lx, yy, text='-', fill=self.TXT, font=FM(8), anchor='e')
-        # the text is one block at the bottom of the panel, the balance figure its last line; the balance bar hangs on the level of the vectorscope's centre line, between the level bars and the text
+        # the text is one block at the bottom of the panel: the DC offset row, hold, peak, session peak and clipped blocks, the balance figure last; the balance bar hangs on the vectorscope's centre line, between the level bars and the text
         lh = tkfont.Font(root=self.root, font=FM(9)).metrics('linespace')
-        txt_top = y1 - ms(8) - 5 * lh - ms(4)
-        self.m_txt = c.create_text(MX(924), txt_top, text='', fill=self.TXT, font=FM(9), anchor='nw', state=('normal' if info else 'hidden'))
-        # the letters L and R of the figures are drawn apart, each in its channel's colour: character 16 and character 27 of every line (the font is monospaced, so they are in columns)
+        txt_top = y1 - ms(8) - 6 * lh - ms(4)
+        self.dc_txt = c.create_text(MX(924), txt_top, text='', fill=self.TXT, font=FM(9), anchor='nw', state=('normal' if info else 'hidden'))
+        self.m_txt = c.create_text(MX(924), txt_top + lh, text='', fill=self.TXT, font=FM(9), anchor='nw', state=('normal' if info else 'hidden'))
+        # the letters L and R of the figures are drawn apart in their channel's colour, at character 16 and 27 of every line (the font is monospaced)
         mfont = tkfont.Font(root=self.root, font=FM(9))
         if info:
-            c.create_text(MX(924) + mfont.measure(' ' * 16), txt_top, text=chr(10).join('LLLL'), fill=self.panel_colors('met')[0], font=FM(9), anchor='nw')
-            c.create_text(MX(924) + mfont.measure(' ' * 27), txt_top, text=chr(10).join('RRRR'), fill=self.panel_colors('met')[1], font=FM(9), anchor='nw')
+            c.create_text(MX(924) + mfont.measure(' ' * 16), txt_top, text=chr(10).join('LLLLL'), fill=self.panel_colors('met')[0], font=FM(9), anchor='nw')
+            c.create_text(MX(924) + mfont.measure(' ' * 27), txt_top, text=chr(10).join('RRRRR'), fill=self.panel_colors('met')[1], font=FM(9), anchor='nw')
         self.bal_y = int(round((y0 + y1) / 2.0))  # level of the vectorscope's centre line (it has the same top and bottom as this panel)
-        self.bal_lbl = c.create_text(MX(924), txt_top + 4 * lh + ms(4), text='', fill=self.TXT, font=FM(9), anchor='nw', state=('normal' if info else 'hidden'))
+        self.bal_lbl = c.create_text(MX(924), txt_top + 5 * lh + ms(4), text='', fill=self.TXT, font=FM(9), anchor='nw', state=('normal' if info else 'hidden'))
+        # the side of the balance figure: L (left louder) or R (right louder), in that channel's colour
+        self.bal_side = c.create_text(MX(924) + mfont.measure(' ' * 16), txt_top + 5 * lh + ms(4), text='', fill=self.CL, font=FM(9), anchor='nw', state=('normal' if info else 'hidden'))
         # spectrum (tag 'spec') and spectrogram (tag 'sg')
         x0, y0, x1, y1 = self.P['spec']
         sfont = tkfont.Font(root=self.root, font=self.F(8))
-        for i, (lo, hi, names, rng) in enumerate(EQ_BANDS):  # the ranges an equaliser uses: tinted bands through the graph, their names under it
+        for lo, hi, names, rng in EQ_BANDS:  # the ranges an equaliser uses: tinted bands through the graph, their names under it
             a, b_ = self.fx(max(lo, 30)), self.fx(hi)
-            if lo > 30 and self.panel_grid('spec') and self.panel_info('spec'):  # the bands and their dividers inside the graph are in its picture; the dividers go on under it, between the names (no names, no dividers)
+            if lo > 30 and self.panel_grid('spec') and self.panel_info('spec'):  # the bands and their dividers are in the graph's picture; the dividers under it sit between the names
                 c.create_line(a, y1, a, y1 + S(30), fill=self.GRID, tags='spec')
             name = next((n for n in names if sfont.measure(n) <= b_ - a - S(4)), names[-1])
             if self.panel_info('spec'):
@@ -2755,8 +2861,7 @@ class App:
         return None
 
     def scope_press(self, e):
-        """a double click enlarges a scope or puts it back.  It is counted here and not by Tk, because Tk goes on counting (a third quick click is still a <Double-Button-1>, and so is the fourth),
-        so a quick click after the double click would undo it.  The second click of a double click is used up: the next click starts a new one"""
+        """a double click enlarges a scope or puts it back.  It is counted here and not by Tk, which goes on counting (a third quick click is still a <Double-Button-1>), so a quick click after the double click would undo it; the second click of a double click is used up"""
         now = time.time()
         last = self.click_last
         if last is not None and now - last[0] <= self.dbl_time and abs(e.x - last[1]) <= self.S(6) and abs(e.y - last[2]) <= self.S(6):
@@ -2791,7 +2896,6 @@ class App:
         self.c.delete('all')
         self.build_scope()
         self.hist_key = None
-        self.sg_photo = None
         self.stop_plots()
         self.set_spec_mode(self.spec_mode)
         self.draw()
@@ -2836,8 +2940,7 @@ class App:
                 sc.wide = self.wide_gain(name)
 
     def panel_burn_level(self, name):
-        """Phosphor: the glow of a window's phosphor beam, 0 (clean lines) to 3 in steps of 0.1: chosen for the window, else the start (PANEL_DEFAULTS; the Classic theme: 1.0 for the
-        vectorscope only, 0.4 for the rest, a crisp, light glow)"""
+        """Phosphor: the glow of a window's beam, 0 (clean lines) to 3 in steps of 0.1: chosen for the window, else PANEL_DEFAULTS (Classic: 1.0 for the vectorscope, 0.4 for the rest)"""
         o = self.panel_opts.get(name, {})
         if 'burn' in o:
             return o['burn']
@@ -2854,8 +2957,7 @@ class App:
         return o.get('left', self.th.left), o.get('right', self.th.right)
 
     def panel_strength(self, name):
-        """how solid the lines of a window are, 1 (the beam's brightness as it is) to 10 (its weak end raised more and more, see _lift_table); 6 unless chosen otherwise in the window's menu.
-        The level bars have none: their dim fill is made that way on purpose"""
+        """how solid the lines of a window are, 1 (the beam's brightness as it is) to 10 (its weak end raised more and more, see _lift_table); 6 unless chosen in the window's menu.  The level bars have none"""
         return STRENGTH_MIN if name == 'met' else self.panel_opts.get(name, {}).get('strength', STRENGTH_DEFAULT)
 
     def strength_lift(self, name):
@@ -2874,6 +2976,27 @@ class App:
             wk = self.plots.get(name)
             if wk is not None and not wk.plot.clean:
                 wk.plot.glow = level
+
+    def every(self, ms):
+        """the number of frames that make up ms milliseconds (at least one)"""
+        return max(1, int(round(ms * self.fps / 1000.0)))
+
+    def rate(self, a):
+        """a smoothing step of a for each frame at 30 frames a second, as the step for each frame of the rate in use"""
+        return 1.0 - (1.0 - a) ** (30.0 / self.fps)
+
+    def auto_frame_rate(self):
+        """once a second: the frames a second follow the time a frame of our code and Tk's drawing of it take (work_ms + redraw_ms), aiming at 70 % of the time of a frame, between FPS_MIN and FPS_MAX.
+        It moves by up to 8 down and 4 up each time, so it never jumps"""
+        want = min(FPS_MAX, max(FPS_MIN, 700.0 / max(self.work_ms + self.redraw_ms, 1.0)))
+        self.fps = min(self.fps + 4.0, want) if want > self.fps else max(self.fps - 8.0, want)
+
+    def set_scope_rate(self, i, save=True):
+        """Scope rate: the rate the oscilloscope and the vectorscope draw from (SCOPE_CHOICES[i], 0 = Auto: what Windows mixes the output at); the capture reopens at it.  For a loopback the output's format in the Windows sound settings (Advanced) must be that rate or more"""
+        self.cap.set_hi_rate(SCOPE_CHOICES[int(min(len(SCOPE_CHOICES) - 1, max(0, i)))])
+        self.vec_last = None  # the vectorscope starts again
+        if save:
+            self.save_settings()
 
     def set_panel_strength(self, name, level, save=True):
         level = int(min(STRENGTH_MAX, max(STRENGTH_MIN, level)))
@@ -2937,8 +3060,7 @@ class App:
         return tick, blank
 
     def panel_menu_build(self, name):
-        """the menu of a window: its grid, its info (numbers and text), Phosphor, Glow and Line strength (steppers: a number with an arrow either side) and its colours (left and right; the vectorscope has one)"""
-        th = self.th
+        """the menu of a window: Grid and Info, the steppers Phosphor, Glow and Line strength (the oscilloscope and vectorscope also Scope rate) and its colours (left and right; the vectorscope has one)"""
         px = max(10, int(round(tkfont.Font(root=self.root, font=self.F(9, 'Segoe UI')).metrics('linespace') * 0.8)))
         tick, blank = self.menu_marks(px)  # a tick or an empty space of the same size to the left of the words: the words line up
         menu = PanelMenu(self, tick, blank)
@@ -2957,6 +3079,8 @@ class App:
         menu.add_stepper('Glow', int(round(self.panel_wide_level(name) * 10)), int(round(BURN_MAX * 10)), burn_text, lambda n, save=True: self.set_panel_wide_level(name, n / 10.0, save), visible=lambda: self.panel_crt(name))
         if name != 'met':  # (the weak end of the beam's brightness raised: more solid lines; only with the beam)
             menu.add_stepper('Line strength', self.panel_strength(name), STRENGTH_MAX, strength_text, lambda n, save=True: self.set_panel_strength(name, n, save), visible=lambda: self.panel_crt(name), n_min=STRENGTH_MIN)
+        if name in ('osc', 'vec'):  # the rate of the capture, for both
+            menu.add_stepper('Scope rate', SCOPE_CHOICES.index(self.cap.hi_rate) if self.cap.hi_rate in SCOPE_CHOICES else 0, len(SCOPE_CHOICES) - 1, rate_text, lambda n, save=True: self.set_scope_rate(n, save))
         menu.add_separator()
         if name == 'vec':
             menu.add_command('Colour...', None, lambda: self.pick_panel_color(name, 'color'))
@@ -3174,7 +3298,6 @@ class App:
             r.bind(seq, h)
         kb('<space>', lambda: self.play_toggle() if self.mode in ('review', 'compare') else setattr(self, 'paused', not self.paused))
         kb('<F5>', self.rec_toggle, True)
-        kb('c', lambda: setattr(self, 'comp', not self.comp))
         kb('r', self.reset_peaks)
         kb('l', self.go_live)
         kb('<Control-o>', self.open_clip, True)
@@ -3567,9 +3690,8 @@ class App:
         i0, i1 = max(0, int((a - o) * 100)), min(len(c.peaks), int((b - o) * 100))
         if i1 <= i0:
             return ''
-        cd = (-c.vol_db) if (self.comp and c.vol_db is not None) else 0.0
-        pk = db(float(c.peaks[i0:i1].max())) + cd
-        li = integrated(c.ms[i0:i1], cd)
+        pk = db(float(c.peaks[i0:i1].max()))
+        li = integrated(c.ms[i0:i1])
         return 'A %s  B %s  (%.2f s)   peak %.1f dBFS   loudness %s LUFS' % (fmt_time(a, True), fmt_time(b, True), b - a, pk, ('%.1f' % li) if li is not None else '--')
 
     # --- comparing two clips ---
@@ -3938,7 +4060,7 @@ class App:
             if r[0] == 'error':
                 self.msg('comparison failed: ' + r[1].strip().splitlines()[-1])
                 return
-            token, origin, end, total, vA, vB, vD, st, dpk = r
+            token, origin, end, _, vA, vB, vD, st, dpk = r
             if token != c['token']:
                 return
             t_head = c['origin'] + self.player.pos / SR  # keep the playhead on the same moment when the axis moved
@@ -4049,7 +4171,7 @@ class App:
             self.tl_key = None
 
     # --- timeline: drawing ---
-    def env_points(self, peaks, t0, cd, lane):
+    def env_points(self, peaks, t0, lane):
         """polygon (flat list) of the level envelope of `peaks` (one value per 10 ms, starting at time t0) inside `lane` = (y_top, y_bottom)"""
         W = self.L1 - self.L0
         nb = len(peaks)
@@ -4061,7 +4183,7 @@ class App:
             return None
         i0 = np.clip(np.floor(edges[:-1]).astype(int), 0, nb - 1)
         env = np.maximum.reduceat(np.ascontiguousarray(peaks), i0)
-        f = np.clip((20 * np.log10(np.maximum(env, 1e-6)) + cd + 60.0) / 60.0, 0.0, 1.0)
+        f = np.clip((20 * np.log10(np.maximum(env, 1e-6)) + 60.0) / 60.0, 0.0, 1.0)
         f[env <= 1e-6] = 0.0
         xs = self.L0 + np.arange(W)
         xs, f = xs[ok], f[ok]
@@ -4108,11 +4230,10 @@ class App:
             self.tl_key = None
             return
         d = self.duration()
-        o = self.origin()
         if self.mode == 'rec':
             self.view = [max(0.0, d - 60.0) if d > 60 else 0.0, max(d, 5.0)]
         c = self.cmp
-        key = (self.mode, round(self.view[0], 3), round(self.view[1], 3), int(d * 4) if self.mode == 'rec' else id(self.clip), self.comp, self.k,
+        key = (self.mode, round(self.view[0], 3), round(self.view[1], 3), int(d * 4) if self.mode == 'rec' else id(self.clip), self.k,
                (c['sa'], c['sb'], id(c['stats']), c['active'], int(self.cap.rec_frames / SR * 4) if c.get('live') else 0) if c else None, self.sel, tuple((m[0], m[1]) for m in self.markers_view()))
         now = time.perf_counter()
         # (while recording the view grows with every frame: the timeline is made again at most every 55 ms, the red playhead still moves every frame)
@@ -4121,7 +4242,7 @@ class App:
             self.tl_built = now
             tl.delete('all')
             lanes = self.lanes()
-            for k, (a, b) in lanes.items():
+            for a, b in lanes.values():
                 tl.create_rectangle(self.L0, a, self.L1, b, outline=self.th.lane_edge, fill=self.th.lane)
             span = self.view[1] - self.view[0]
             step = next((s for s in (0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600) if s / span * (self.L1 - self.L0) >= S(90)), 600)
@@ -4139,9 +4260,8 @@ class App:
                 for which, col in (('A', self.th.env_a), ('B', self.th.env_b)):
                     clip = c[which]
                     pk = clip.peaks.max(axis=1)
-                    cd = (-clip.vol_db) if (self.comp and clip.vol_db is not None) else 0.0
                     s0 = c['s' + which.lower()]
-                    pts = self.env_points(pk, s0, cd, lanes[which])
+                    pts = self.env_points(pk, s0, lanes[which])
                     if pts and len(pts) >= 6:
                         self.tl_poly(dr, pts, col)
                     outlines.append((which, s0, clip.duration))
@@ -4172,16 +4292,14 @@ class App:
                     with self.cap.lock:
                         peaks = np.array(self.cap.rec_pk, dtype=np.float32).reshape(-1, 2)
                         flat = np.array(self.cap.rec_fl, dtype=bool).reshape(-1, 2)
-                    vol_db = self.cap.rec_vol
                 else:
-                    peaks, flat, vol_db = self.clip.peaks, self.clip.flat, self.clip.vol_db
-                cd = (-vol_db) if (self.comp and vol_db is not None) else 0.0
+                    peaks, flat = self.clip.peaks, self.clip.flat
                 if len(peaks):
                     from PIL import ImageColor
                     layer, dr = self.tl_layer()
                     for ch in (0, 1):
                         a, b = lanes[ch]
-                        pts = self.env_points(peaks[:, ch], 0.0, cd, lanes[ch])
+                        pts = self.env_points(peaks[:, ch], 0.0, lanes[ch])
                         if pts and len(pts) >= 6:
                             self.tl_poly(dr, pts, (self.th.env_l, self.th.env_r)[ch])
                         pk_col = ImageColor.getrgb(self.th.peak)
@@ -4226,7 +4344,7 @@ class App:
             self.draw_timeline()
             wk = self.plots.get('hist')
             if wk is not None and self.zoom in (None, 'hist'):
-                self.show_plot('hist', self.hist_item, wk)  # the picture built since the last frame goes on screen, at the same steady beat as the other graphs
+                self.show_plot('hist', self.hist_item, wk)  # the picture built since the last frame goes on screen
             self.refresh_history()
             if not self.paused:
                 self.draw()
@@ -4234,9 +4352,13 @@ class App:
             self.c.itemconfig(self.status, text='drawing error: ' + traceback.format_exc().splitlines()[-1])
         spent = (time.perf_counter() - t0) * 1000.0
         self.work_ms += (spent - self.work_ms) * 0.1
+        now = time.perf_counter()
+        if now - self.fps_checked >= 1.0:
+            self.fps_checked = now
+            self.auto_frame_rate()
         self.tick_end = time.perf_counter()
         self.root.after_idle(self.idle_mark)  # when Tk has nothing left to do, it has put the pictures of this frame on screen
-        self.root.after(max(1, int(33 - spent)), self.tick)  # 30 frames a second however long a frame took to draw (as long as it took less than 33 ms)
+        self.root.after(max(1, int(round(1000.0 / self.fps - spent))), self.tick)  # steady frames however long a frame took to draw
 
     def idle_mark(self):
         if self.tick_end:
@@ -4244,36 +4366,36 @@ class App:
             self.tick_end = 0.0
 
     def busy(self):
-        """True while the window cannot keep up (a frame of our code and Tk's drawing of it take most of its 33 ms): the busiest graphs are then drawn every other frame, which keeps the
-        window answering at once"""
+        """True while the window cannot keep up even at the slowest frame rate (a frame of our code and Tk's drawing of it take most of its 33 ms): the busiest graphs are then drawn every other frame,
+        which keeps the window answering at once.  Faster than that the frame rate gives way first (see auto_frame_rate)"""
         load = self.work_ms + self.redraw_ms
         was = self.__dict__.get('_busy', False)
-        self._busy = load > 24.0 if not was else load > 17.0  # (it stays busy until it has plenty of room again)
+        self._busy = self.fps <= FPS_MIN + 0.5 and (load > 24.0 if not was else load > 17.0)  # (it stays busy until it has plenty of room again)
         return self._busy and self.frame % 2 == 1
 
     def update_transport(self):
         self.update_source_button()
-        self.b_rec.config(text=('■ STOP' if self.mode == 'rec' else '● REC'), bg=('#a02828' if self.mode == 'rec' else self.th.btn))
-        self.b_play.config(text=('❚❚ PAUSE' if self.player.playing else '▶ PLAY'), state=('normal' if (self.mode == 'review' or (self.mode == 'compare' and not (self.cmp and self.cmp.get('live')))) else 'disabled'))
-        self.b_loop.config(bg=(self.th.on if self.player.loop else self.th.btn))
-        self.b_spec.config(bg=(self.th.on if self.spec_mode == 'spectrogram' else self.th.btn))
+        cfg(self.b_rec, text=('■ STOP' if self.mode == 'rec' else '● REC'), bg=('#a02828' if self.mode == 'rec' else self.th.btn))
+        cfg(self.b_play, text=('❚❚ PAUSE' if self.player.playing else '▶ PLAY'), state=('normal' if (self.mode == 'review' or (self.mode == 'compare' and not (self.cmp and self.cmp.get('live')))) else 'disabled'))
+        cfg(self.b_loop, bg=(self.th.on if self.player.loop else self.th.btn))
+        cfg(self.b_spec, bg=(self.th.on if self.spec_mode == 'spectrogram' else self.th.btn))
         if self.mode == 'rec':
-            self.lbl_time.config(text='● REC  ' + fmt_time(self.duration(), True), fg='#ff6b6b')
+            cfg(self.lbl_time, text='● REC  ' + fmt_time(self.duration(), True), fg='#ff6b6b')
             if self.duration() * SR >= MAX_REC:
                 self.rec_toggle()
         elif self.mode == 'review':
-            self.lbl_time.config(text='%s / %s' % (fmt_time(self.player.pos / SR, True), fmt_time(self.clip.duration, True)), fg=self.th.fg)
+            cfg(self.lbl_time, text='%s / %s' % (fmt_time(self.player.pos / SR, True), fmt_time(self.clip.duration, True)), fg=self.th.fg)
         elif self.mode == 'compare':
             lv = bool(self.cmp and self.cmp.get('live'))
-            self.lbl_time.config(text=(('LIVE  clip at ' + fmt_time(self.head_t() - self.cmp['sa'], True)) if lv else fmt_time(self.head_t(), True)) + ('  ...' if (self.cmp and not lv and (self.cmp_busy or self.cmp['dirty'])) else ''),
+            cfg(self.lbl_time, text=(('LIVE  clip at ' + fmt_time(self.head_t() - self.cmp['sa'], True)) if lv else fmt_time(self.head_t(), True)) + ('  ...' if (self.cmp and not lv and (self.cmp_busy or self.cmp['dirty'])) else ''),
                                  fg=('#ff6b6b' if lv else self.th.fg))
-            self.b_cclose.config(text=('Stop live' if lv else 'Close'))
+            cfg(self.b_cclose, text=('Stop live' if lv else 'Close'))
         else:
-            self.lbl_time.config(text='LIVE', fg=self.th.live)
+            cfg(self.lbl_time, text='LIVE', fg=self.th.live)
 
     # --- drawing the scope panels ---
     def fx(self, f):
-        x0, y0, x1, y1 = self.P['spec']
+        x0, _, x1, _ = self.P['spec']
         return x0 + (math.log10(f) - math.log10(30)) / (math.log10(20000) - math.log10(30)) * (x1 - x0)
 
     def source(self, n):
@@ -4287,55 +4409,64 @@ class App:
         return self.cap.last(n)
 
     def draw(self):
-        cap, c, S = self.cap, self.c, self.S
+        cap, c = self.cap, self.c
         if cap.error:
             c.itemconfig(self.status, text='capture error: ' + cap.error.strip().splitlines()[-1], fill='#ff6666')
             return
         clip = self.active_clip() if self.mode in ('review', 'compare') else None
-        x = self.source(4096)
+        xh, kk = None, 1
+        if clip is None and self.source_is_live():
+            end = cap.pos
+            x = cap.window(end, 4096)
+            if cap.hk > 1:
+                xh, kk = cap.hi_window(end, 4096)  # the same stretch at the scope rate
+        else:
+            x = self.source(4096)
         L, R = x[:, 0], x[:, 1]
         seg = L[:2048]
         zc = np.where((seg[:-1] < 0) & (seg[1:] >= 0))[0]
         s = int(zc[0]) if len(zc) else 0
         n = 1536
-        # the gain fits what is drawn (the trace and the last 800 samples of the vectorscope): it falls at once, so a peak never runs into the panel edge, and rises gently
-        pk = max(float(np.abs(x[s:s + n]).max()), float(np.abs(x[-800:]).max()))
+        # the gain fits what is drawn: it falls at once, so a peak never runs into the panel edge, and rises gently
+        gx = xh if xh is not None else x
+        pk = max(float(np.abs(gx[s * kk:(s + n) * kk]).max()), float(np.abs(gx[-800 * kk:]).max()))
         tgt = min(1000.0, 0.9 / max(pk, 1e-4))
-        self.gain = tgt if tgt < self.gain else self.gain + (tgt - self.gain) * 0.15
+        self.gain = tgt if tgt < self.gain else self.gain + (tgt - self.gain) * self.rate(0.15)
         g = self.gain
         slow = self.busy()  # this frame is one of the ones the busiest graphs sit out
         if self.zoom in (None, 'osc') and not slow:
-            self.draw_osc(L, R, s, n, g, clip)
+            if xh is not None:
+                self.draw_osc(xh[:, 0], xh[:, 1], s * kk, n * kk, g, clip, kk)
+            else:
+                self.draw_osc(L, R, s, n, g, clip)
         if self.zoom in (None, 'vec'):
             self.draw_vector(x, g, clip)
         # levels
         tnow = time.time()
         if clip is not None:
             v = (clip.vol_db, None, False) if clip.vol_db is not None else None
-            cd = (-clip.vol_db) if (self.comp and clip.vol_db is not None) else 0.0
             b = min(len(clip.peaks), max(1, self.player.pos // BLOCK))
             hist = [tuple(h) for h in clip.peaks[max(0, b - 10):b]]
             sess = [float(clip.peaks[:b, 0].max()), float(clip.peaks[:b, 1].max())]
             flat = [int(clip.flat[:b, 0].sum()), int(clip.flat[:b, 1].sum())]
             devtxt = 'clip: ' + (clip.name or '?')
         else:
-            cv = cap.vol
-            v = cv
-            cd = (-cv[0]) if (self.comp and cv and not cv[2]) else 0.0
+            v = cap.vol
             with cap.lock:
                 hist = [cap.hist[i] for i in range(-min(10, len(cap.hist)), 0)]
                 sess = list(cap.sess)
                 flat = list(cap.flat)
-            devtxt = cap.device + ((' - ' + cap.warn) if cap.warn else '') + (('  ' + cap.eq_note) if cap.eq_note else '')
+            devtxt = cap.device + ((' - ' + cap.warn) if cap.warn else '') + (('  ' + cap.eq_note) if cap.eq_note else '') + '   |   ' + self.rate_note()
         recent = hist[-10:] or [(0.0, 0.0)]
         now_pk = [max(h[i] for h in recent) for i in (0, 1)]
-        dbn = [db(v_) + cd for v_ in now_pk]
-        if self.frame % 3 == 0:  # the average sample over the last second, per channel: loudness figures cannot see this
+        dbn = [db(v_) for v_ in now_pk]
+        if self.frame % self.every(100) == 0:  # the average sample over the last second, per channel (loudness figures cannot see DC)
             second = clip.data[max(0, self.player.pos - SR):max(1, self.player.pos)] if clip is not None else cap.last(SR)
-            self.dc_now = [100.0 * float(second[:, i].mean()) * 10 ** (cd / 20.0) for i in (0, 1)] if len(second) else [0.0, 0.0]
-        worst_dc = max(abs(self.dc_now[0]), abs(self.dc_now[1]))  # shown only from 1 %: a clean signal has none, so the readout would only ever say 0.0
-        c.itemconfig(self.dc_txt, text=('DC  L %+.1f%%  R %+.1f%%' % tuple(self.dc_now)) if worst_dc >= 1.0 else '', fill=(self.th.peak if worst_dc > 3.0 else self.th.dim))
-        x0, y0, x1, y1 = self.P['met']
+            self.dc_now = [100.0 * float(second[:, i].mean()) for i in (0, 1)] if len(second) else [0.0, 0.0]
+        worst_dc = max(abs(self.dc_now[0]), abs(self.dc_now[1]))
+        shown_dc = [v_ if abs(v_) >= 1.0 else 0.0 for v_ in self.dc_now]  # a channel under 1 % reads a solid 0.0: a clean signal has hardly any offset, and the last digit would only flicker
+        c.itemconfig(self.dc_txt, text='%-15s   %6s     %6s' % (('DC offset',) + tuple(('%+.1f' % v_) if v_ else '0.0' for v_ in shown_dc)), fill=(self.th.peak if worst_dc > 3.0 else self.TXT))  # (percent of full scale, in the columns of the figures below; red above 3 %)
+        x0, y0 = self.P['met'][:2]
         bars, holds = [], []
         for i in (0, 1):
             if dbn[i] >= self.hold[i] or tnow - self.hold_t[i] > 1.5:
@@ -4344,11 +4475,10 @@ class App:
             bars.append((xb, self.bar_top + min(1.0, max(0.0, -dbn[i] / 60.0)) * self.bar_h, xb + self.ms(50), self.bar_top + self.bar_h))
             holds.append(self.bar_top + min(1.0, max(0.0, -self.hold[i] / 60.0)) * self.bar_h)
         rms = [math.sqrt(float(np.mean(x[-9600:, i] ** 2))) for i in (0, 1)]
-        # balance: both channels at once, from the centre outwards: the left level grows to the left, the right level to the right (same 60 dB scale as the peak bars).
-        # The levels rise at once and fall over about a sixth of a second, so the bars do not flicker
+        # balance: the left level grows left from the centre, the right level right (same 60 dB scale as the peak bars); levels rise at once and fall over about a sixth of a second
         for i in (0, 1):
-            now = db(rms[i]) + cd
-            self.bal_lv[i] = now if now > self.bal_lv[i] else self.bal_lv[i] + (now - self.bal_lv[i]) * 0.2
+            now = db(rms[i])
+            self.bal_lv[i] = now if now > self.bal_lv[i] else self.bal_lv[i] + (now - self.bal_lv[i]) * self.rate(0.2)
         half = self.ms(139)
         lens = [min(1.0, max(0.0, (60.0 + v_) / 60.0)) * half for v_ in self.bal_lv]
         bal_rects = [(self.bal_x - lens[0], self.bal_y - self.ms(5), self.bal_x, self.bal_y + self.ms(5)), (self.bal_x, self.bal_y - self.ms(5), self.bal_x + lens[1], self.bal_y + self.ms(5))]
@@ -4356,18 +4486,21 @@ class App:
         if self.zoom in (None, 'met'):
             self.draw_bars(x0 + 1, y0 + 1)
         bal = (self.bal_lv[1] - self.bal_lv[0]) if min(self.bal_lv) > -100 else 0.0
-        c.itemconfig(self.bal_lbl, text='%-16s%+.1f dB' % ('balance', -bal + 0.0))  # positive: the left channel is louder (its bar is the longer)
+        diff = round(abs(bal), 1)  # L when the left level is the higher one, R when the right one is, none when they are alike
+        side = '' if diff == 0 else ('L' if bal < 0 else 'R')
+        c.itemconfig(self.bal_lbl, text='%-16s  %.1f dB' % ('balance', diff))
+        c.itemconfig(self.bal_side, text=side, fill=(self.CL if side == 'L' else self.CR))
         c.itemconfig(self.m_txt, text=('%-15s   %6.1f     %6.1f\n' % (('hold',) + tuple(self.hold)) +
                                        '%-15s   %6.1f     %6.1f\n' % (('peak',) + tuple(dbn)) +
-                                       '%-15s   %6.1f     %6.1f\n' % (('clip peak' if clip is not None else 'session peak', db(sess[0]) + cd, db(sess[1]) + cd)) +
+                                       '%-15s   %6.1f     %6.1f\n' % (('clip peak' if clip is not None else 'session peak', db(sess[0]), db(sess[1]))) +
                                        '%-15s   %6d     %6d' % (('clipped blocks',) + tuple(flat))))
         if self.spec_mode == 'spectrum':
             pos = self.player.pos if clip is not None else None
-            if self.zoom in (None, 'spec') and not slow and not (pos is not None and pos == self.plot_pos.get('spec') and 'spec' in self.photos):
+            if self.zoom in (None, 'spec') and not slow and (self.fps < 45 or self.frame % 2 == 0) and not (pos is not None and pos == self.plot_pos.get('spec') and 'spec' in self.photos):
                 self.plot_pos['spec'] = pos
-                self.draw_spectrum(L, R, cd)
-        elif self.frame % 3 == 0:
-            self.draw_spectrogram(clip, cd)
+                self.draw_spectrum(L, R)
+        elif self.frame % self.every(100) == 0:
+            self.draw_spectrogram(clip)
         in_cmp = self.mode == 'compare'
         in_find = self.findings_on and self.mode == 'review' and self.clip is not None and self.clip.findings is not None
         c.itemconfig('hist', state=('hidden' if (in_cmp or in_find) else 'normal'))
@@ -4383,17 +4516,16 @@ class App:
         volt = ''
         if v:
             if v[1] is not None:
-                volt = 'Windows volume %d%% (%.1f dB)%s' % (round(v[1] * 100), v[0], '  MUTED - nothing is heard here!' if v[2] else '')
+                volt = 'Windows volume %d%% (%.1f dB)' % (round(v[1] * 100), v[0])
             else:
                 volt = 'recorded at Windows volume %.1f dB' % v[0]
-            if self.comp:
-                volt += '  Windows volume ignored'
         lv = bool(self.cmp and self.cmp.get('live'))
         who = ({'A': 'the recorded clip at the running point', 'B': 'the live sound', 'D': ''}[self.cmp['active']] if lv else {'A': 'A', 'B': 'B', 'D': 'the difference'}[self.cmp['active']]) if self.cmp else ''
         mode = {'live': 'LIVE', 'rec': 'LIVE + RECORDING', 'review': ('PLAYING' if self.player.playing else 'CLIP'),
                 'compare': (('LIVE COMPARE - showing %s' % who) if lv else ('COMPARE - listening to %s%s' % (who, ' (PLAYING)' if self.player.playing else '')))}[self.mode]
-        c.itemconfig(self.status, text='%s   |   %s   |   %s' % ('PAUSED' if self.paused else mode, devtxt, volt), fill=('#ff6666' if (v and v[2]) else self.TXT))
-        if self.sel and self.frame % 10 == 0 and self.mode in ('review', 'compare'):
+        head = 'PAUSED' if self.paused else mode
+        c.itemconfig(self.status, text='   |   '.join(([] if head == 'LIVE' else [head]) + [devtxt, volt]), fill=self.TXT)  # (plain live listening needs no word: the bottom right says LIVE)
+        if self.sel and self.frame % self.every(333) == 0 and self.mode in ('review', 'compare'):
             self.msg(self.sel_stats_text())
 
     def stop_plots(self):
@@ -4420,7 +4552,7 @@ class App:
             return BeamPlot(base, th.bg, colors, tau, exposure, power, max_bits, glow, blend) if crt else CleanPlot(base, th.bg, colors)
         rows = [int(round(i * (h - 1) / float(len(DB_LINES) - 1))) for i in range(len(DB_LINES))] if grid else []
         if name == 'osc':
-            pl = mk(plot_base(w, h, th.bg, th.grid, middle=grid, frame=self.panel_border(name)), 0.025, 1.3, 0.35, 64)
+            pl = mk(plot_base(w, h, th.bg, th.grid, middle=grid, frame=self.panel_border(name)), OSC_TAU, 1.3, 0.35, 64)
         elif name == 'spec':
             bands, cols = [], []
             for i, (lo, hi, _names, _rng) in enumerate(EQ_BANDS if grid else ()):
@@ -4429,7 +4561,7 @@ class App:
                     bands.append((a, b_))
                 if lo > 30:
                     cols.append(a)
-            pl = mk(plot_base(w, h, th.bg, th.grid, th.peak, rows, cols, bands, mix(th.bg, th.fg, 0.05), frame=self.panel_border(name)), 0.04, 3.2, 0.25, 64)
+            pl = mk(plot_base(w, h, th.bg, th.grid, th.peak, rows, cols, bands, mix(th.bg, th.fg, 0.05), frame=self.panel_border(name)), SPEC_TAU, 3.2, 0.25, 64)
         elif name == 'met':
             wm, hm = int(x1 - x0) - 1, int(y1 - y0) - 1  # the picture is one pixel inside the panel's frame
             a = plot_base(wm, hm, th.bg, th.grid, frame=False)
@@ -4446,7 +4578,7 @@ class App:
                 a[by - self.ms(7):by + self.ms(7) + 1, cx] = g
             pl = BeamPlot(a, th.bg, colors, 0.05, 1.3, 1.0, 64, glow, flat=not crt)
         else:  # a level history has to keep its dips visible, so a fast stroke is not dimmed (power 0)
-            pl = mk(plot_base(w, h, th.bg, th.grid, th.peak, rows, frame=self.panel_border(name)), 0.05, 0.32, 0.0, 200, 'white')  # each channel keeps its colour; where they overlap the line turns white, without the thick burnt band that adding their light made
+            pl = mk(plot_base(w, h, th.bg, th.grid, th.peak, rows, frame=self.panel_border(name)), 0.05, 0.32, 0.0, 200, 'white')  # each channel keeps its colour; where they overlap the line turns white
         if crt:
             for sc in pl.screens:
                 if name != 'met':
@@ -4473,7 +4605,7 @@ class App:
                     self.c.itemconfig(bi, image='')
                 return
             ix, iy = self.c.coords(item)
-            if bi is None:  # the little picture of the rows with light: an image just above the background (and below whatever was drawn after it)
+            if bi is None:  # the small picture of the rows with light sits just above the background
                 bi = self.band_items[name] = self.c.create_image(ix, iy, anchor='nw', tags=[t_ for t_ in self.c.gettags(item) if t_ != 'current'])
                 self.c.tag_raise(bi, item)
             bph = self.band_photos.get(name)
@@ -4497,11 +4629,25 @@ class App:
     def frame_dt(self, name):
         """the seconds since this graph was last drawn (between 16 and 100 ms): how long its phosphor has been fading"""
         now = time.time()
-        dt = min(0.1, max(0.016, now - self.plot_time.get(name, now - 0.033)))
+        dt = min(0.1, max(0.008, now - self.plot_time.get(name, now - 1.0 / self.fps)))
         self.plot_time[name] = now
         return dt
 
-    def draw_osc(self, L, R, s, n, g, clip):
+    def rate_note(self):
+        """the sample rate that comes in, for the status line: 'Sample rate 192k' (what Windows mixes the output at; what the capture reads at when that is not known), plus ' (Scope rate 96k)' when a Scope rate was chosen that is not Auto and not the same"""
+        cap = self.cap
+        incoming = cap.mix_rate or SR * max(1, cap.hk)
+        txt = 'Sample rate %gk' % (incoming / 1000.0)
+        if cap.hi_rate and cap.hi_rate != incoming:
+            txt += ' (Scope rate %gk)' % (cap.hi_rate / 1000.0)
+        return txt
+
+    def source_is_live(self):
+        """is what the scopes show the sound card (not a clip)?"""
+        c = self.active_clip()
+        return not (self.mode in ('review', 'compare') and c is not None)
+
+    def draw_osc(self, L, R, s, n, g, clip, k=1):
         """the oscilloscope (rising-edge trigger on the left channel): the stretch is added to each channel's phosphor screen.  A paused recording keeps its picture"""
         x0, y0, x1, y1 = self.P['osc']
         pos = self.player.pos if clip is not None else None
@@ -4517,20 +4663,26 @@ class App:
             ys = np.clip(h / 2.0 - d[s:s + n] * g * (h / 2.0 - 4), 1.0, h - 1.0)
             paths.append((xs, ys))
             self.osc_pts.append((xs + x0, ys + y0))
-        wk.add(lambda pl: [pl.add(ch, a[0], a[1], dt) for ch, a in enumerate(paths)])
+
+        limit = int(120000 * 30.0 / self.fps)  # (the bits of light a frame may use: the same per second at any frame rate)
+
+        def job(pl, extra=0.0):
+            t = dt + extra
+            pool_map(lambda a: pl.add(a[0], a[1][0], a[1][1], t, frame_gain(t, OSC_TAU) / k, limit), list(enumerate(paths)))  # (the two channels on two threads)
+        wk.add(stale(job, dt))
         self.show_plot('osc', self.osc_item, wk)
 
     def draw_vector(self, x, g, clip):
         """the vectorscope: the samples since the last frame are added to the beam screen (left across, right up) and its picture is shown"""
         x0, y0, x1, y1 = self.P['vec']
         side = int(min(x1 - x0, y1 - y0)) - 2
-        size = max(64, min(side, 520))
+        size = max(64, min(side, VEC_MAX))
         wk = self.plots.get('vec')
         crt = self.panel_crt('vec')
         glow = self.panel_burn_level('vec')
         if wk is None or wk.plot.screen.size != size or wk.plot.side != side or wk.plot.clean == crt:
             self.stop_plot('vec')
-            plot = BeamVector(size, side, self.vec_lut, glow) if crt else CleanVector(size, side, self.panel_vec_color(), self.BG, glow)
+            plot = BeamVector(size, side, self.vec_lut, glow, self.S(276)) if crt else CleanVector(size, side, self.panel_vec_color(), self.BG, glow)
             if crt:
                 plot.screen.lift = self.strength_lift('vec')
             wk = self.plots['vec'] = BeamWorker(plot, self.THREADED)
@@ -4548,13 +4700,22 @@ class App:
             self.show_plot('vec', self.vec_item, wk)
             return
         self.vec_last = pos
-        seg = x[-(new + 1):]  # the first is the last sample of the previous frame, so the path goes on without a gap
+        k, up, cut = 1, 1, None
+        if clip is None and self.cap.hk > 1:
+            # at the scope rate, a few samples behind the newest (the interpolation needs their neighbours), interpolated on the graph's own thread
+            seg, k = self.cap.hi_window(pos, new + 1 + 2 * SCOPE_CONTEXT)
+            up = SCOPE_SMOOTH
+            cut = (SCOPE_CONTEXT * k * up, (SCOPE_CONTEXT + new + 1) * k * up)
+        else:
+            seg = x[-(new + 1):]  # the first is the last sample of the previous frame, so the path goes on without a gap
         u, v, dt = seg[:, 0] * g, seg[:, 1] * g, new / float(SR)
+        limit = int(min(200000, max(20000, 3.6e6 * dt)))  # (120000 bits for a frame of 1/30 s)
 
         def job(pl):
             if clear:
                 pl.screen.clear()
-            pl.screen.add(u, v, dt)
+            uu, vv = (u, v) if cut is None else (sinc_upsample(u, up)[cut[0]:cut[1]], sinc_upsample(v, up)[cut[0]:cut[1]])
+            pl.screen.add(uu, vv, dt, 1.0 / (k * up), limit)
         wk.add(job)
         self.show_plot('vec', self.vec_item, wk)
 
@@ -4596,8 +4757,7 @@ class App:
         if bi is not None:
             self.c.delete(bi)
 
-    def draw_spectrum(self, L, R, cd):
-        c = self.c
+    def draw_spectrum(self, L, R):
         x0, y0, x1, y1 = self.P['spec']
         sc = self.spec_cache
         if sc is None or sc[0] != (x0, x1):  # which FFT bins each of the 139 bands covers, and where it sits across the graph: the same until the layout changes
@@ -4615,14 +4775,18 @@ class App:
         for ch, data in ((0, L), (1, R)):
             mag = np.append(np.abs(np.fft.rfft(data * win)) * 2.0 / win.sum(), 0.0)  # (a spare element: a band may end at the last bin)
             v_ = np.maximum.reduceat(mag, idx)[0::2]  # the strongest bin of each band (a band with no bin of its own gets the bin it falls on)
-            dd = db_array(v_) + cd
+            dd = db_array(v_)
             py = np.clip(y0 + (-dd) / DB_RANGE * (y1 - y0), y0, y1)
             paths.append((px - x0, py - y0))
             self.spec_pts.append((px, py))
-        wk.add(lambda pl: [pl.add(ch, a[0], a[1], dt) for ch, a in enumerate(paths)])
+        def job(pl, extra=0.0):
+            t = dt + extra
+            for ch, a in enumerate(paths):
+                pl.add(ch, a[0], a[1], t, frame_gain(t, SPEC_TAU))
+        wk.add(stale(job, dt))
         self.show_plot('spec', self.spec_item, wk)
 
-    def draw_spectrogram(self, clip, cd):
+    def draw_spectrogram(self, clip):
         c = self.c
         x0, y0, x1, y1 = self.P['spec']
         W, H = x1 - x0 - 2, y1 - y0 - 2
@@ -4654,49 +4818,43 @@ class App:
             if hi > lo:
                 arr[lo - c0:hi - c0] = sg[lo:hi]
             head = x0 + 1 + int((ncols - fut) / float(ncols) * W)
-        idx = (np.clip((arr + cd + 90.0) / 90.0, 0.0, 1.0) * 255).astype(np.uint8)
+        idx = (np.clip((arr + 90.0) / 90.0, 0.0, 1.0) * 255).astype(np.uint8)
         wk = self.plots.get('sg')
         if wk is None:
             wk = self.plots['sg'] = BeamWorker(SpectrogramPicture(), self.THREADED)
-        wk.add(lambda pl, idx=idx, lut=self.lut, size=(W, H): pl.set(idx, lut, size))  # (the colours and the enlargement are made on a thread of their own)
+        wk.add(stale(lambda pl, extra=0.0, idx=idx, lut=self.lut, size=(W, H): pl.set(idx, lut, size)))  # (the colours and the enlargement are made on a thread of their own)
         self.show_plot('sg', self.sg_item, wk)
-        self.sg_photo = self.photos.get('sg')
         c.coords(self.sg_head, (head if head is not None else -10), y0, (head if head is not None else -10), y1)
 
     def smooth_pos(self, pos, running):
-        """the position (samples) of the sound that is shown, as a smooth number.  The real one only moves in whole 10 ms blocks that arrive in bursts, so what is drawn from it would judder;
-        this follows it with a clock that runs at the sound's own speed and is nudged towards the real position, so it cannot drift"""
+        """the position (samples) of the sound that is shown, smoothed: the real one moves in whole 10 ms blocks that arrive in bursts, so drawing from it would judder.  This follows it with a clock at the sound's own speed, nudged towards the real position so it cannot drift"""
         now = time.perf_counter()
         st = self.pos_clock
         if st is None or not running or abs(pos - st[1]) > 0.1 * SR:  # the first time, a stopped sound, or a jump (a seek, a loop)
             self.pos_clock = (now, float(pos))
             return float(pos)
         est = st[1] + (now - st[0]) * SR
-        est += (pos - est) * 0.08
+        est += (pos - est) * self.rate(0.08)
         self.pos_clock = (now, est)
         return est
 
     def refresh_history(self):
-        """redraw the level history when it has moved on by an eighth of a pixel or what it shows has changed: called once a frame, so the line moves a fraction of a pixel at a time, at the
-        same steady beat as the other graphs (it used to step a whole pixel, about 17 times a second, at the pace of a timer of its own)"""
+        """redraw the level history when it has moved on by an eighth of a pixel or what it shows has changed (once a frame, so the line moves a fraction of a pixel at a time)"""
         if self.paused or self.mode == 'compare' or (self.findings_on and self.mode == 'review') or self.zoom not in (None, 'hist'):
             return False
         if self.__dict__.get('_busy', False) and self.frame % 2 == 1:  # (see busy)
             return False
-        x0, y0, x1, y1 = self.P['hist']
+        x0, _, x1, _ = self.P['hist']
         width = int(x1 - x0)
         clip = self.clip if self.mode == 'review' else None
         if clip is not None:
             posf = max(1.0, self.smooth_pos(self.player.pos, self.player.playing) / float(BLOCK))
             total = min(len(clip.peaks), max(1, self.player.pos // BLOCK))
-            cd = (-clip.vol_db) if (self.comp and clip.vol_db is not None) else 0.0
         else:
             posf = self.smooth_pos(self.cap.pos, True) / float(BLOCK)
             total = self.cap.pos // BLOCK
-            v = self.cap.vol
-            cd = (-v[0]) if (self.comp and v and not v[2]) else 0.0
         cur = posf * width / HIST_BLOCKS  # where "now" is, in columns, as a fraction: the history moves by a fraction of a pixel at a time
-        key = (int(cur * 8), round(cd, 2), id(clip), width)  # a new picture for every eighth of a column
+        key = (int(cur * 8), id(clip), width)  # a new picture for every eighth of a column
         if key == self.hist_key:
             return False
         self.hist_key = key
@@ -4706,13 +4864,11 @@ class App:
             with self.cap.lock:
                 hist = list(self.cap.hist)
                 total = self.cap.pos // BLOCK
-        self.draw_history(hist, cd, total, cur)
+        self.draw_history(hist, total, cur)
         return True
 
-    def draw_history(self, hist, cd, total, cur=None):
-        """hist: the last blocks (oldest first, (peak L, peak R) each) of a run of `total` blocks.  The panel has one column per pixel and every block belongs to one fixed column
-        (block * width // 3000), so a complete column never changes.  cur: where "now" is, in columns (a fraction): every column is drawn at its age from there, so the whole line moves
-        smoothly; without it the newest complete column sits at the right edge and the picture moves a whole pixel at a time"""
+    def draw_history(self, hist, total, cur=None):
+        """hist: the last blocks (oldest first, (peak L, peak R) each) of a run of `total` blocks.  The panel has one column per pixel and every block belongs to one fixed column (block * width // 3000), so a complete column never changes.  cur: where "now" is, in columns (a fraction), so the whole line moves smoothly instead of a whole pixel at a time"""
         x0, y0, x1, y1 = self.P['hist']
         width = int(x1 - x0)
         arr = np.asarray(hist, dtype=np.float64)
@@ -4733,19 +4889,19 @@ class App:
         self.plot_time['hist'] = time.time()
         self.hist_pts, paths = [], []
         for i in (0, 1):
-            dd = np.maximum(-DB_RANGE, 20 * np.log10(np.maximum(bars[:, i], 1e-6)) + cd)
+            dd = np.maximum(-DB_RANGE, 20 * np.log10(np.maximum(bars[:, i], 1e-6)))
             ys = y0 + (-np.minimum(dd, 0.0)) / DB_RANGE * (y1 - y0)
             paths.append((xs - x0, ys - y0))
             self.hist_pts.append((xs, ys))
 
         offsets = self.HIST_OFFSETS if self.panel_crt('hist') else (0.0,)  # (a clean line is drawn once)
 
-        def job(pl):
+        def job(pl, extra=0.0):
             pl.clear()  # a fresh picture each time: the history scrolls, it does not fade
             for i, a in enumerate(paths):
                 for dy in offsets:  # the line is drawn a few times a fraction of a pixel apart: a more solid line
                     pl.add(i, a[0], a[1] + dy, 0.0)
-        wk.add(job)
+        wk.add(stale(job))
         self.show_plot('hist', self.hist_item, wk)
 
     def cmp_report(self):
@@ -4753,11 +4909,9 @@ class App:
         if c.get('live'):
             return self.live_report()
         A, B, st = c['A'], c['B'], c['stats']
-        cdA = (-A.vol_db) if (self.comp and A.vol_db is not None) else 0.0
-        cdB = (-B.vol_db) if (self.comp and B.vol_db is not None) else 0.0
         fm = lambda v: ('%.1f' % v) if v is not None else '--'
-        la, lb = A.integrated(cdA), B.integrated(cdB)
-        pa, pb = db(A.peak) + cdA, db(B.peak) + cdB
+        la, lb = A.integrated(), B.integrated()
+        pa, pb = db(A.peak), db(B.peak)
         lines = ['loudness (integrated)   A %s LUFS    B %s LUFS    B - A  %s LU' % (fm(la), fm(lb), ('%+.1f' % (lb - la)) if (la is not None and lb is not None) else '--'),
                  'peak                    A %.1f dBFS   B %.1f dBFS   B - A  %+.1f dB' % (pa, pb, pb - pa),
                  'start positions         A %+.3f s    B %+.3f s    (B starts %+.3f s after A)' % (c['sa'], c['sb'], c['sb'] - c['sa'])]
@@ -4835,7 +4989,7 @@ def main():
             pass
         try:
             sys.setswitchinterval(0.001)  # the window thread gets the interpreter back within a millisecond when a graph's thread has it
-            ctypes.windll.winmm.timeBeginPeriod(1)  # without it Windows timers tick every 15.6 ms, so 33 ms frames come 33-48 ms apart
+            ctypes.windll.winmm.timeBeginPeriod(1)  # without it Windows timers tick every 15.6 ms, so frames come late and uneven
         except Exception:
             pass
         try:  # its own taskbar button with its own icon, not grouped under Python's when run from source
