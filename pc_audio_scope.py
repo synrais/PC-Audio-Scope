@@ -55,6 +55,7 @@ SCOPE_SMOOTH = 4  # points per sample drawn between the samples at the scope rat
 SCOPE_CONTEXT = 8  # (48 kHz) samples drawn behind the newest, so the interpolation has its neighbours
 SCOPE_CHOICES = (0, 48000, 96000, 192000)  # 0 is Auto
 FPS_MIN, FPS_MAX = 30.0, 60.0  # the frames a second the window is drawn at: anywhere between these, as the computer allows
+ENLARGE_POW = 1.5  # an enlarged graph gets more light than in proportion to how much bigger it is (measured: this keeps its lines as bright as in the normal layout)
 OSC_TAU, SPEC_TAU = 0.025, 0.04  # how long the light of the oscilloscope and of the spectrum lasts (seconds)
 FLOOR = -120.0
 
@@ -1198,6 +1199,7 @@ class BeamPlot:
         self.base = Image.fromarray(base, 'RGB')
         self.base_arr = np.ascontiguousarray(base)
         self.base_room = 255 - self.base_arr  # how much light each pixel can take before it is white
+        self.energy = 1.0  # a factor on the light of everything that is drawn
         self.power, self.max_bits, self.glow, self.blend = power, max_bits, glow, blend  # blend where the channels overlap: 'add' (white-hot), 'max' (each keeps its colour) or 'white' (the max, turned white by how much of both there is)
 
     def clear(self):
@@ -1206,7 +1208,7 @@ class BeamPlot:
 
     def add(self, ch, xs, ys, dt, scale=1.0, limit=120000):
         """channel ch draws the path through the points (pixel positions in the graph) during dt seconds; limit: the most bits of light the path is cut into"""
-        self.screens[ch].add_path(np.asarray(xs, np.float64) * self.f, np.asarray(ys, np.float64) * self.f, dt, self.power, self.max_bits, scale, limit)
+        self.screens[ch].add_path(np.asarray(xs, np.float64) * self.f, np.asarray(ys, np.float64) * self.f, dt, self.power, self.max_bits, scale * self.energy, limit)
 
     def image(self):
         if self.flat:  # plain areas: a darker fill, bright edges and hold line in the colour, no glow
@@ -1294,7 +1296,7 @@ class BeamVector:
         self.side, self.lut, self.glow = side, lut, glow
         ratio = size / float(ref) if ref else 1.0  # how much bigger the screen is than in the normal layout: the same light on a line that is that much longer is dimmer, so it gets more
         if ratio > 1.0:  # (more than in proportion: measured, this keeps the lines as bright and white-hot as in the normal layout)
-            self.screen.energy = min(8.0, ratio ** 1.5)
+            self.screen.energy = min(8.0, ratio ** ENLARGE_POW)
 
     def image(self):
         img = self.screen.render(self.lut, self.glow)
@@ -2371,11 +2373,12 @@ class PanelMenu:
         top.update_idletasks()
         top.deiconify()
         top.lift()
-        try:
-            top.focus_force()
-            top.grab_set()  # a click anywhere else in the program comes here, and closes the menu
-        except tk.TclError:
-            pass
+        if not self.HIDDEN:  # (the tests do not take the keyboard and the mouse from whoever is using the computer)
+            try:
+                top.focus_force()
+                top.grab_set()  # a click anywhere else in the program comes here, and closes the menu
+            except tk.TclError:
+                pass
 
     tk_popup = popup
 
@@ -2740,6 +2743,7 @@ class App:
                       met=((CW - mwid) // 2, (CH - mhei) // 2, (CW - mwid) // 2 + mwid, (CH - mhei) // 2 + mhei))
         away = self.CW + S(100)  # panels that are not shown are built this far to the right, out of sight
         hid = lambda n: zoom is not None and n != zoom
+        self.P_normal = {n: tuple(S(v) for v in r) for n, r in base.items()}  # (the windows as they are in the normal layout)
         self.P = {}
         for n, r in base.items():
             r = zoomed[n] if n == zoom else tuple(S(v) for v in r)
@@ -4485,7 +4489,7 @@ class App:
         self.met_geom = {'bars': bars, 'hold': holds, 'bal': bal_rects}  # canvas coordinates
         if self.zoom in (None, 'met'):
             self.draw_bars(x0 + 1, y0 + 1)
-        bal = (self.bal_lv[1] - self.bal_lv[0]) if min(self.bal_lv) > -100 else 0.0
+        bal = self.bal_lv[1] - self.bal_lv[0]
         diff = round(abs(bal), 1)  # L when the left level is the higher one, R when the right one is, none when they are alike
         side = '' if diff == 0 else ('L' if bal < 0 else 'R')
         c.itemconfig(self.bal_lbl, text='%-16s  %.1f dB' % ('balance', diff))
@@ -4579,6 +4583,10 @@ class App:
             pl = BeamPlot(a, th.bg, colors, 0.05, 1.3, 1.0, 64, glow, flat=not crt)
         else:  # a level history has to keep its dips visible, so a fast stroke is not dimmed (power 0)
             pl = mk(plot_base(w, h, th.bg, th.grid, th.peak, rows, frame=self.panel_border(name)), 0.05, 0.32, 0.0, 200, 'white')  # each channel keeps its colour; where they overlap the line turns white
+        if crt and name in ('osc', 'spec'):
+            nx0, ny0, nx1, ny1 = self.P_normal[name]
+            ratio = math.sqrt(w * h / float((nx1 - nx0 + 1) * (ny1 - ny0 + 1)))  # how much bigger the window is than in the normal layout
+            pl.energy = min(8.0, ratio ** ENLARGE_POW) if ratio > 1.0 else 1.0
         if crt:
             for sc in pl.screens:
                 if name != 'met':

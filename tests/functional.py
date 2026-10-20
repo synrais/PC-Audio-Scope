@@ -238,6 +238,9 @@ for name in ('osc', 'vec', 'met', 'spec', 'hist'):
         check('the zoomed vectorscope gets a bigger beam screen, drawn from the sound', app.beam is not None and 300 < app.beam.size <= m.VEC_MAX and float(app.beam.buf.max()) > 0, app.beam.size if app.beam else None)
     if name == 'spec':
         check('the zoomed spectrum still names its ranges under the graph', any(app.c.itemcget(i, 'text') == 'Bass' and app.c.coords(i)[1] > app.P['spec'][3] and app.c.coords(i)[0] < app.CW for i in app.c.find_withtag('spec') if app.c.type(i) == 'text'))
+    if name in ('osc', 'spec'):
+        app.draw()
+        check('the zoomed %s gets more light than in the normal layout, so its lines are as bright as there' % name, app.plots[name].plot.energy > 1.5, app.plots[name].plot.energy)
     app.scope_click(Ev0(x=app.S(300), y=app.S(300)))
     pump(root, 0.3)
     check('clicking again shows all the panels again (%s)' % name, app.zoom is None and app.P == normal_P and app.panel_frame == normal_frame, (app.zoom,))
@@ -990,6 +993,7 @@ for _ in range(40):
     app.draw()
 bl, br = list(app.met_geom['bal'][0]), list(app.met_geom['bal'][1])
 check('left channel only: the left bar is long and the right bar has no length', app.bal_x - bl[0] > app.S(60) and br[2] - app.bal_x < 1, (bl, br, app.bal_x))
+check('left channel only: the balance figure says L with the whole difference (not nothing)', app.c.itemcget(app.bal_side, 'text') == 'L' and float(app.c.itemcget(app.bal_lbl, 'text').split()[1]) > 60.0, (app.c.itemcget(app.bal_side, 'text'), app.c.itemcget(app.bal_lbl, 'text')))
 rows = np.flatnonzero(app.beam.buf.sum(axis=1) > 0)
 mid_row = (app.beam.size - 1) / 2.0
 check('left channel only: the beam draws a horizontal line through the middle of the vectorscope', len(rows) and rows.min() >= mid_row - 1.5 and rows.max() <= mid_row + 1.5, (rows.min() if len(rows) else None, rows.max() if len(rows) else None, mid_row))
@@ -1002,6 +1006,7 @@ for _ in range(40):
     app.draw()
 bl, br = list(app.met_geom['bal'][0]), list(app.met_geom['bal'][1])
 check('right channel only: the right bar is long and the left bar has no length', br[2] - app.bal_x > app.S(60) and app.bal_x - bl[0] < 1, (bl, br, app.bal_x))
+check('right channel only: the balance figure says R with the whole difference', app.c.itemcget(app.bal_side, 'text') == 'R' and float(app.c.itemcget(app.bal_lbl, 'text').split()[1]) > 60.0, (app.c.itemcget(app.bal_side, 'text'), app.c.itemcget(app.bal_lbl, 'text')))
 app.open_loaded(m.Clip(np.stack([sig, sig * 0.5], axis=1), None, name='left 6 dB louder'))
 app.player.pos = 2 * m.SR + 4096
 for _ in range(40):

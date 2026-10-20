@@ -93,6 +93,8 @@ check('BeamVector: the normal size gets no extra light, an enlarged one gets mor
       and m.BeamVector(5000, 5000, m.beam_palette(th.bg, th.left, light=True), 1.0, 276).screen.energy == 8.0, (small_v.screen.energy, big_v.screen.energy))
 check('BeamVector: the same ring on the enlarged screen is as bright at its brightest as on the small one (it is not dimmer)', float(big_v.screen.buf.max()) >= 0.9 * float(small_v.screen.buf.max()), (float(big_v.screen.buf.max()), float(small_v.screen.buf.max())))
 
+check('BeamPlot: a factor on the light (energy) makes the same path brighter', (lambda a, b: float(b.screens[0].buf.max()) > 1.8 * float(a.screens[0].buf.max()))(*[(lambda p: (setattr(p, 'energy', e), p.add(0, np.linspace(0, 99, 60), np.full(60, 25.0), 0.0), p)[2])(m.BeamPlot(m.plot_base(100, 50, th.bg, th.grid), th.bg, (th.left, th.right), 0.03, 1.3)) for e in (1.0, 2.0)]))
+
 # ---- the worker: the graph is drawn on a thread of its own
 import threading
 import time
