@@ -359,10 +359,10 @@ def stepper_labels(menu_):
 
 mn_ = app.panel_menu_build('osc')
 mv_ = app.panel_menu_build('vec')
-check('the menu of a window: its name, Grid, Info, the stepper rows Narrow burn and Line strength, the left and the right colour (and nothing to go back from yet)',
-      menu_labels(mn_) == ['Oscilloscope', 'Grid', 'Info', 'Left colour...', 'Right colour...'] and stepper_labels(mn_) == ['Narrow burn', 'Wide burn', 'Line strength'], (menu_labels(mn_), stepper_labels(mn_)))
+check('the menu of a window: its name, Grid, Info, the stepper rows Phosphor and Line strength, the left and the right colour (and nothing to go back from yet)',
+      menu_labels(mn_) == ['Oscilloscope', 'Grid', 'Info', 'Left colour...', 'Right colour...'] and stepper_labels(mn_) == ['Phosphor', 'Glow', 'Line strength'], (menu_labels(mn_), stepper_labels(mn_)))
 check('the vectorscope has one colour, not two', menu_labels(mv_) == ['Vectorscope', 'Grid', 'Info', 'Colour...'], menu_labels(mv_))
-check('the menu shows what is on now: the grid and the info are on, and the oscilloscope has Narrow burn 0.4 (the vectorscope 1.0)', mn_._on == (True, True, True, 0.4) and mv_._on == (True, True, True, 1.0), (mn_._on, mv_._on))
+check('the menu shows what is on now: the grid and the info are on, and the oscilloscope has Phosphor 0.4 (the vectorscope 1.0)', mn_._on == (True, True, True, 0.4) and mv_._on == (True, True, True, 1.0), (mn_._on, mv_._on))
 check('a tick is a little picture left of the words (a blank one of the same size when off), not a Tk check mark that is drawn over them',
       all(mn_.type(i_) == 'command' for i_ in (2, 3)) and mn_.type(4) == 'stepper' and mn_.entrycget(2, 'compound') == 'left' and mn_.entrycget(2, 'image') == str(mn_._marks[0]) and mn_.entrycget(3, 'image') == str(mn_._marks[0])
       and (mn_._marks[0].width(), mn_._marks[0].height()) == (mn_._marks[1].width(), mn_._marks[1].height()) and mn_._marks[0].width() >= 10,
@@ -389,22 +389,22 @@ check('Grid off for the levels: the tick lines of the dB numbers are gone too', 
       and abs(app.c.coords(i_)[1] - app.c.coords(i_)[3]) < 0.01 and app.P['met'][0] < app.c.coords(i_)[0] < app.P['met'][2] and app.P['met'][1] + app.S(10) < app.c.coords(i_)[1] < app.bar_top + app.bar_h + 2 and app.c.coords(i_)[2] - app.c.coords(i_)[0] < app.S(60)])
 app.panel_opts.clear()
 app.refresh_panels()
-check('the default Narrow burn: the oscilloscope, spectrum and level history 0.4, the vectorscope 1.0, the levels 1.0 (Classic: the vectorscope only)',
+check('the default Phosphor: the oscilloscope, spectrum and level history 0.4, the vectorscope 1.0, the levels 1.0 (Classic: the vectorscope only)',
       all({n_: (lambda t_: (setattr(app, 'th', t_), app.panel_burn_level(n_))[1])(t_) for n_ in m.PANELS} == {'osc': 0.4, 'spec': 0.4, 'hist': 0.4, 'vec': 1.0, 'met': 1.0 if t_.glow else 0.4} for t_ in m.THEMES), [t_.name for t_ in m.THEMES])
 app.th = m.THEMES[app.theme_i]
 hm_ = app.panel_menu_build('hist')
-hm_.set_stepper(hm_.entries.index(hm_.stepper('Narrow burn')), 10)  # 1.0
-check('Narrow burn stepped to 1.0 for the history only: its glow changes, the oscilloscope and the vectorscope keep their own',
+hm_.set_stepper(hm_.entries.index(hm_.stepper('Phosphor')), 10)  # 1.0
+check('Phosphor stepped to 1.0 for the history only: its glow changes, the oscilloscope and the vectorscope keep their own',
       app.panel_burn_level('hist') == 1.0 and app.beam_plot('hist').plot.glow == 1.0 and app.beam_plot('osc').plot.glow == 0.4 and app.panel_burn_level('vec') == 1.0, (app.panel_opts, app.th.name))
 vm_ = app.panel_menu_build('vec')
-vm_.set_stepper(vm_.entries.index(vm_.stepper('Narrow burn')), 4)  # 0.4
+vm_.set_stepper(vm_.entries.index(vm_.stepper('Phosphor')), 4)  # 0.4
 app.draw()
 check('and for the vectorscope (1.0 by default): its beam screen gets the new glow', app.panel_burn_level('vec') == 0.4 and app.plots['vec'].plot.glow == 0.4, app.plots['vec'].plot.glow)
 app.panel_opts.clear()
 app.refresh_panels()
 app.set_spec_mode('spectrogram')
 sm_ = app.panel_menu_build('spec')
-check('the spectrogram has no Narrow burn, no Overburn, no grid and no colours to choose (they do nothing to it): its menu is its name and Info', menu_labels(sm_) == ['Spectrogram', 'Info'], menu_labels(sm_))
+check('the spectrogram has no Phosphor, no Overburn, no grid and no colours to choose (they do nothing to it): its menu is its name and Info', menu_labels(sm_) == ['Spectrogram', 'Info'], menu_labels(sm_))
 sm_.invoke(2)
 check('...and Info still turns its text off (and back on)', app.panel_opts['spec']['info'] is False and app.panel_menu_build('spec').index('end') == 2, app.panel_opts)
 app.panel_menu_build('spec').invoke(2)
@@ -513,7 +513,7 @@ check('"back to the theme colours" gives the window the theme colours again, and
 del app.ask_color
 app.panel_opts.clear()
 app.refresh_panels()
-# ---- Narrow burn (0 = clean lines, to 3, steps of 0.1) and Line strength (0 to 10) are steppers in the menu of the beam windows
+# ---- Phosphor (0 = clean lines, to 3, steps of 0.1) and Line strength (0 to 10) are steppers in the menu of the beam windows
 app.go_live()
 pump(root, 0.2)
 app.panel_opts.clear()
@@ -521,9 +521,9 @@ app.refresh_panels()
 for n_ in ('osc', 'vec', 'spec', 'hist'):
     app.draw()
 bm_ = {n_: app.panel_menu_build(n_) for n_ in ('osc', 'vec', 'spec', 'hist', 'met')}
-check('Narrow burn and Line strength are stepper rows in the menu of the oscilloscope, vectorscope, spectrum and history; the levels have Narrow burn only',
-      all(stepper_labels(bm_[n_]) == ['Narrow burn', 'Wide burn', 'Line strength'] for n_ in ('osc', 'vec', 'spec', 'hist')) and stepper_labels(bm_['met']) == ['Narrow burn', 'Wide burn'], [stepper_labels(bm_[n_]) for n_ in bm_])
-check('the start: Narrow burn 0.4 (the vectorscope 1.0, the levels 1.0 unless the theme is Classic), Line strength 6, none for the levels',
+check('Phosphor and Line strength are stepper rows in the menu of the oscilloscope, vectorscope, spectrum and history; the levels have Phosphor only',
+      all(stepper_labels(bm_[n_]) == ['Phosphor', 'Glow', 'Line strength'] for n_ in ('osc', 'vec', 'spec', 'hist')) and stepper_labels(bm_['met']) == ['Phosphor', 'Glow'], [stepper_labels(bm_[n_]) for n_ in bm_])
+check('the start: Phosphor 0.4 (the vectorscope 1.0, the levels 1.0 unless the theme is Classic), Line strength 6, none for the levels',
       [app.panel_burn_level(n_) for n_ in ('osc', 'spec', 'hist', 'vec', 'met')] == [0.4, 0.4, 0.4, 1.0, 1.0 if app.th.glow else 0.4] and all(app.panel_strength(n_) == 6 for n_ in ('osc', 'vec', 'spec', 'hist')) and app.panel_strength('met') == 1
       and [m.burn_text(n_) for n_ in (0, 4, 14, 30)] == ['Off', '0.4', '1.4', '3.0'] and [m.strength_text(n_) for n_ in (1, 6, 9, 10)] == ['1', '6', '9', '10'], bm_['osc']._on)
 lifts_ = {n_: [sc_.lift for sc_ in app.beam_plot(n_).plot.screens] for n_ in ('osc', 'spec', 'hist', 'met')}
@@ -533,13 +533,13 @@ check('the beams are drawn with the Light lift (0.75) and their glow; the level 
 # stepping: live, without building the window again
 pl_before = app.beam_plot('osc')
 mo_ = app.panel_menu_build('osc')
-i_burn = mo_.entries.index(mo_.stepper('Narrow burn'))
+i_burn = mo_.entries.index(mo_.stepper('Phosphor'))
 i_str = mo_.entries.index(mo_.stepper('Line strength'))
 moved_ = mo_.step(i_burn, 1)
-check('a step of Narrow burn: 0.5, the beam is drawn with it at once and the picture is not started again; it is in the settings file',
+check('a step of Phosphor: 0.5, the beam is drawn with it at once and the picture is not started again; it is in the settings file',
       moved_ and app.panel_burn_level('osc') == 0.5 and app.beam_plot('osc') is pl_before and pl_before.plot.glow == 0.5 and json.load(open(m.SETTINGS))['panels']['osc']['burn'] == 0.5, (app.panel_opts, moved_))
 mo_.set_stepper(i_burn, 30)
-check('up to 3.0 and no further', app.panel_burn_level('osc') == 3.0 and pl_before.plot.glow == 3.0 and not mo_.step(i_burn, 1) and mo_.stepper('Narrow burn')['n'] == 30, app.panel_opts)
+check('up to 3.0 and no further', app.panel_burn_level('osc') == 3.0 and pl_before.plot.glow == 3.0 and not mo_.step(i_burn, 1) and mo_.stepper('Phosphor')['n'] == 30, app.panel_opts)
 mo_.step(i_str, 3)
 check('Line strength: 9 lifts the beam with 0.6 at once, the others keep theirs, and it is in the settings file',
       app.panel_strength('osc') == 9 and all(abs(sc_.lift - 0.6) < 1e-9 for sc_ in pl_before.plot.screens) and abs(app.beam_plot('hist').plot.screens[0].lift - 0.75) < 1e-9
@@ -548,32 +548,32 @@ mo_.set_stepper(i_str, 0)
 check('Line strength 1 (the lowest) is the beam as it is: no lift at all, and it does not go below', app.panel_strength('osc') == 1 and mo_.stepper('Line strength')['n'] == 1 and not mo_.step(i_str, -1) and [sc_.lift for sc_ in pl_before.plot.screens] == [1.0, 1.0], [sc_.lift for sc_ in pl_before.plot.screens])
 mo_.set_stepper(i_burn, 0)
 mq_ = app.panel_menu_build('osc')
-check('Narrow burn 0 is clean lines: the window is made again without the beam, and Line strength is not offered', not app.panel_crt('osc') and app.beam_plot('osc').plot.clean and not mo_.visible(mo_.stepper('Line strength')) and not mq_.visible(mq_.stepper('Line strength'))
-      and mq_.stepper('Narrow burn')['n'] == 0, app.panel_opts)
+check('Phosphor 0 is clean lines: the window is made again without the beam, and Line strength is not offered', not app.panel_crt('osc') and app.beam_plot('osc').plot.clean and not mo_.visible(mo_.stepper('Line strength')) and not mq_.visible(mq_.stepper('Line strength'))
+      and mq_.stepper('Phosphor')['n'] == 0, app.panel_opts)
 mo_.set_stepper(i_burn, 5)
 check('and back to 0.5: the beam is back, with the strength it had', app.panel_crt('osc') and not app.beam_plot('osc').plot.clean and app.beam_plot('osc').plot.glow == 0.5 and app.panel_strength('osc') == 1 and mo_.visible(mo_.stepper('Line strength')), app.panel_opts)
-i_wide = mo_.entries.index(mo_.stepper('Wide burn'))
+i_wide = mo_.entries.index(mo_.stepper('Glow'))
 pw_ = app.beam_plot('osc')
-check('Wide burn starts at 0: no wide glow in any beam', app.panel_wide_level('osc') == 0.0 and all(sc_.wide == 0.0 for sc_ in pw_.plot.screens) and app.wide_gain('osc') == 0.0, app.panel_opts.get('osc'))
+check('Glow starts at 0: no wide glow in any beam', app.panel_wide_level('osc') == 0.0 and all(sc_.wide == 0.0 for sc_ in pw_.plot.screens) and app.wide_gain('osc') == 0.0, app.panel_opts.get('osc'))
 mo_.set_stepper(i_wide, 15)
-check('Wide burn 1.5: the beams get a wide glow of gain 6.0 (4.0 for each 1.0) at once, the picture is not started again, the others have none, and it is in the settings file',
+check('Glow 1.5: the beams get a wide glow of gain 6.0 (4.0 for each 1.0) at once, the picture is not started again, the others have none, and it is in the settings file',
       app.panel_wide_level('osc') == 1.5 and app.beam_plot('osc') is pw_ and all(abs(sc_.wide - 6.0) < 1e-9 for sc_ in pw_.plot.screens) and app.beam_plot('hist').plot.screens[0].wide == 0.0
       and json.load(open(m.SETTINGS))['panels']['osc']['wide'] == 1.5, app.panel_opts.get('osc'))
 mo_.set_stepper(i_burn, 0)
-check('with Narrow burn 0 (clean lines) there is no Wide burn row', not mo_.visible(mo_.stepper('Wide burn')) and not app.panel_crt('osc') and app.beam_plot('osc').plot.clean, app.panel_opts.get('osc'))
+check('with Phosphor 0 (clean lines) there is no Glow row', not mo_.visible(mo_.stepper('Glow')) and not app.panel_crt('osc') and app.beam_plot('osc').plot.clean, app.panel_opts.get('osc'))
 mo_.set_stepper(i_burn, 5)
-check('...and it comes back with the value it had', mo_.visible(mo_.stepper('Wide burn')) and app.panel_wide_level('osc') == 1.5 and all(abs(sc_.wide - 6.0) < 1e-9 for sc_ in app.beam_plot('osc').plot.screens), app.panel_opts.get('osc'))
+check('...and it comes back with the value it had', mo_.visible(mo_.stepper('Glow')) and app.panel_wide_level('osc') == 1.5 and all(abs(sc_.wide - 6.0) < 1e-9 for sc_ in app.beam_plot('osc').plot.screens), app.panel_opts.get('osc'))
 mo_.set_stepper(i_wide, 30)
-check('Wide burn goes up to 3.0 (gain 12.0) and no further', app.panel_wide_level('osc') == 3.0 and not mo_.step(i_wide, 1) and abs(app.beam_plot('osc').plot.screens[0].wide - 12.0) < 1e-9, app.panel_opts.get('osc'))
+check('Glow goes up to 3.0 (gain 12.0) and no further', app.panel_wide_level('osc') == 3.0 and not mo_.step(i_wide, 1) and abs(app.beam_plot('osc').plot.screens[0].wide - 12.0) < 1e-9, app.panel_opts.get('osc'))
 mo_.set_stepper(i_wide, 0)
 ml_ = app.panel_menu_build('met')
-ml_.set_stepper(ml_.entries.index(ml_.stepper('Narrow burn')), 20)
-ml_.set_stepper(ml_.entries.index(ml_.stepper('Wide burn')), 10)
-check('the levels have a Wide burn too (1.0: gain 4.0)', app.panel_wide_level('met') == 1.0 and all(abs(sc_.wide - 4.0) < 1e-9 for sc_ in app.beam_plot('met').plot.screens), app.panel_opts.get('met'))
+ml_.set_stepper(ml_.entries.index(ml_.stepper('Phosphor')), 20)
+ml_.set_stepper(ml_.entries.index(ml_.stepper('Glow')), 10)
+check('the levels have a Glow too (1.0: gain 4.0)', app.panel_wide_level('met') == 1.0 and all(abs(sc_.wide - 4.0) < 1e-9 for sc_ in app.beam_plot('met').plot.screens), app.panel_opts.get('met'))
 check('the levels step too (2.0)', app.panel_burn_level('met') == 2.0 and app.beam_plot('met').plot.glow == 2.0, app.panel_opts.get('met'))
-check('settings: Wide burn is 0 to 3 in tenths, anything else is dropped', m.clean_panel_opts({'osc': {'wide': 1.26}}) == {'osc': {'wide': 1.3}} and m.clean_panel_opts({'osc': {'wide': 3.5}}) == {} and m.clean_panel_opts({'osc': {'wide': True}}) == {}
+check('settings: Glow is 0 to 3 in tenths, anything else is dropped', m.clean_panel_opts({'osc': {'wide': 1.26}}) == {'osc': {'wide': 1.3}} and m.clean_panel_opts({'osc': {'wide': 3.5}}) == {} and m.clean_panel_opts({'osc': {'wide': True}}) == {}
       and m.clean_panel_opts({'osc': {'wide': 0, 'burn': 2.0}}) == {'osc': {'wide': 0.0, 'burn': 2.0}})
-check('settings: Narrow burn is 0 to 3 in tenths, Line strength 1 to 10; the older Off / On / Overburn and Default / Light / Strong choices are read as numbers; anything else is dropped',
+check('settings: Phosphor is 0 to 3 in tenths, Line strength 1 to 10; the older Off / On / Overburn and Default / Light / Strong choices are read as numbers; anything else is dropped',
       m.clean_panel_opts({'osc': {'burn': 1.26, 'strength': 7}}) == {'osc': {'burn': 1.3, 'strength': 7}} and m.clean_panel_opts({'osc': {'burn': 3.5}}) == {} and m.clean_panel_opts({'osc': {'burn': True, 'strength': 11}}) == {} and m.clean_panel_opts({'osc': {'strength': 0}}) == {}
       and m.clean_panel_opts({'osc': {'crt': False, 'overburn': True}}) == {'osc': {'burn': 0.0}} and m.clean_panel_opts({'osc': {'overburn': True}}) == {'osc': {'burn': 1.0}}
       and m.clean_panel_opts({'osc': {'overburn': False}}) == {'osc': {'burn': 0.4}} and m.clean_panel_opts({'osc': {'glow': True}}) == {'osc': {'burn': 1.0}} and m.clean_panel_opts({'osc': {'classic': True}}) == {'osc': {'burn': 0.4}}
@@ -602,7 +602,7 @@ try:
           full_ == {'osc': (False, False), 'vec': (False, False), 'met': (False, False), 'spec': (False, True), 'hist': (False, True)}, full_)
     burn_ = {n_: m.App.panel_burn_level(stub_, n_) for n_ in m.PANELS}
     wide_ = {n_: m.App.panel_wide_level(stub_, n_) for n_ in m.PANELS}
-    check('first run: Narrow burn 0.3 for every window but the levels (1.0); Wide burn 0.5, 0.3, 0.3, 0.2 and 0.3 (oscilloscope, vectorscope, spectrum, history, levels); every beam window starts on Line strength 6',
+    check('first run: Phosphor 0.3 for every window but the levels (1.0); Glow 0.5, 0.3, 0.3, 0.2 and 0.3 (oscilloscope, vectorscope, spectrum, history, levels); every beam window starts on Line strength 6',
           burn_ == {'osc': 0.3, 'vec': 0.3, 'met': 1.0, 'spec': 0.3, 'hist': 0.3} and wide_ == {'osc': 0.5, 'vec': 0.3, 'met': 0.3, 'spec': 0.3, 'hist': 0.2} and all(m.App.panel_crt(stub_, n_) for n_ in m.PANELS)
           and all(m.App.panel_strength(stub_, n_) == 6 for n_ in ('osc', 'vec', 'spec', 'hist')) and m.App.panel_strength(stub_, 'met') == 1, (burn_, wide_))
     classic_ = [t_ for t_ in m.THEMES if t_.name == 'Classic'][0]
@@ -611,7 +611,7 @@ try:
     check('the Classic theme keeps its crisp look: only the vectorscope burns (1.0), the rest 0.4, and nothing is wide', cb_ == {'osc': 0.4, 'vec': 1.0, 'met': 0.4, 'spec': 0.4, 'hist': 0.4} and all(v_ == 0.0 for v_ in cw_.values()), (cb_, cw_))
     stub_.th = th_sh
     stub_.panel_opts = {'osc': {'burn': 1.5, 'wide': 0.0}}
-    check('Narrow burn and Wide burn chosen in a menu win over the starting ones (a Wide burn of 0 is a choice too)', m.App.panel_burn_level(stub_, 'osc') == 1.5 and m.App.panel_wide_level(stub_, 'osc') == 0.0 and m.App.panel_wide_level(stub_, 'vec') == 0.3, stub_.panel_opts)
+    check('Phosphor and Glow chosen in a menu win over the starting ones (a Glow of 0 is a choice too)', m.App.panel_burn_level(stub_, 'osc') == 1.5 and m.App.panel_wide_level(stub_, 'osc') == 0.0 and m.App.panel_wide_level(stub_, 'vec') == 0.3, stub_.panel_opts)
     stub_.panel_opts = {'spec': {'grid': True}, 'osc': {'fs_info': True, 'fs_grid': True}}
     stub_.zoom = 'osc'
     check('a choice made in a window\'s menu wins over the starting one', m.App.panel_grid(stub_, 'spec') is True and m.App.panel_grid(stub_, 'osc') is True and m.App.panel_info(stub_, 'osc') is True and m.App.panel_info(stub_, 'hist') is True, stub_.panel_opts)

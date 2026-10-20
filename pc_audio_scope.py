@@ -823,7 +823,7 @@ PANEL_TITLES = {'osc': 'Oscilloscope', 'vec': 'Vectorscope', 'met': 'Levels', 's
 DEFAULT_THEME = 'Orange + blue'  # the theme a first run starts with
 # what a window starts with before anything is chosen in its menu (anything not listed is on): the enlarged windows have no grid, and no info except the spectrum and the level history; the spectrum has no grid
 # in the normal layout either
-# 'burn' (Narrow burn) and 'wide' (Wide burn) too, for a theme with glow (the Classic theme keeps its crisp look: only the vectorscope burns, nothing wide)
+# 'burn' (Phosphor) and 'wide' (Glow) too, for a theme with glow (the Classic theme keeps its crisp look: only the vectorscope burns, nothing wide)
 PANEL_DEFAULTS = {'osc': {'fs_grid': False, 'fs_info': False, 'burn': 0.3, 'wide': 0.5}, 'vec': {'fs_grid': False, 'fs_info': False, 'burn': 0.3, 'wide': 0.3},
                   'met': {'fs_grid': False, 'fs_info': False, 'burn': 1.0, 'wide': 0.3}, 'hist': {'fs_grid': False, 'burn': 0.3, 'wide': 0.2},
                   'spec': {'grid': False, 'fs_grid': False, 'burn': 0.3, 'wide': 0.3}}
@@ -832,7 +832,7 @@ HEX_COLOUR = re.compile(r'^#[0-9a-fA-F]{6}$')
 
 def clean_panel_opts(d):
     """the choices made for each window (right-click it), as read from the settings file: anything unknown or invalid is left out.  Per window: 'grid', 'info' (its numbers and text) and the same two for when it fills the window, 'fs_grid' and 'fs_info', 'crt'
-    'burn' (Narrow burn: the glow of the phosphor beam, 0 = clean lines, to 3), 'wide' (Wide burn: a broad, faint glow, 0 to 3), 'strength' (Line strength, 1 to 10: how solid the beam's lines are), 'left' and 'right' (a colour each; the vectorscope has just 'color').  'glow' was the first
+    'burn' (Phosphor: the glow of the phosphor beam, 0 = clean lines, to 3), 'wide' (Glow: a broad, faint glow, 0 to 3), 'strength' (Line strength, 1 to 10: how solid the beam's lines are), 'left' and 'right' (a colour each; the vectorscope has just 'color').  'glow' was the first
     name of 'overburn', 'classic' the one before it (the other way round)"""
     out = {}
     if not isinstance(d, dict):
@@ -851,7 +851,7 @@ def clean_panel_opts(d):
         burn = o.get('burn')
         if isinstance(burn, (int, float)) and not isinstance(burn, bool) and 0 <= burn <= BURN_MAX:
             keep['burn'] = round(float(burn) * 10) / 10.0
-        elif o.get('crt') is False:  # (CRT burn was on or off, and Overburn on or off; now it is one level, Narrow burn.  'glow' and 'classic' were the first names of Overburn)
+        elif o.get('crt') is False:  # (CRT burn was on or off, and Overburn on or off; now it is one level, Phosphor.  'glow' and 'classic' were the first names of Overburn)
             keep['burn'] = 0.0
         else:
             ob = o['overburn'] if isinstance(o.get('overburn'), bool) else o['glow'] if isinstance(o.get('glow'), bool) else (not o['classic']) if isinstance(o.get('classic'), bool) else None
@@ -1083,7 +1083,7 @@ class BeamScreen:
 _GAIN_TABLES = {}
 _LIFT_TABLES = {}
 WIDE_SIGMA = 20.0  # the width of the wide glow, in units of the screen's size relative to the first vectorscope (276 pixels); 78 pixels at 1080 high
-WIDE_GAIN = 4.0  # the gain of the wide glow for each 1.0 of Wide burn (a faint haze at 0.5, a clear one at 1.0)
+WIDE_GAIN = 4.0  # the gain of the wide glow for each 1.0 of Glow (a faint haze at 0.5, a clear one at 1.0)
 
 
 def _blur_small(a, sigma):
@@ -1099,7 +1099,7 @@ def _blur_small(a, sigma):
     return sum(kern[i] * p[:, i:i + w] for i in range(2 * r + 1))
 STRENGTH_MIN, STRENGTH_MAX, STRENGTH_DEFAULT = 1, 10, 6  # 'Line strength': 1 (the beam's brightness as it is) to 10; each step lowers the exponent of _lift_table by 0.05 (6 is what Light was: 0.75, 9 what Strong was: 0.6)
 STRENGTH_LEGACY = {'Default': 1, 'Off': 1, 'Light': 6, 'Strong': 9}  # (the strength was a name before it was a number)
-BURN_MAX, BURN_LOW, BURN_HIGH = 3.0, 0.4, 1.0  # 'Narrow burn': the glow of the beam, 0 (clean lines) to 3 in steps of 0.1 ('Wide burn', 0 to 3, is the broad faint one); a window starts on the low level or the high one (the old On and Overburn)
+BURN_MAX, BURN_LOW, BURN_HIGH = 3.0, 0.4, 1.0  # 'Phosphor': the glow of the beam, 0 (clean lines) to 3 in steps of 0.1 ('Glow', 0 to 3, is the broad faint one); a window starts on the low level or the high one (the old On and Overburn)
 
 
 def strength_text(n):
@@ -2816,7 +2816,7 @@ class App:
         return self.panel_opts.get(name, {}).get(key, PANEL_DEFAULTS.get(name, {}).get(key, True))
 
     def panel_wide_level(self, name):
-        """Wide burn: the broad, faint glow of a window's beam, 0 (none) to 3 in steps of 0.1: chosen for the window, else the start (PANEL_DEFAULTS; none with the Classic theme)"""
+        """Glow: the broad, faint glow of a window's beam, 0 (none) to 3 in steps of 0.1: chosen for the window, else the start (PANEL_DEFAULTS; none with the Classic theme)"""
         o = self.panel_opts.get(name, {})
         if 'wide' in o:
             return o['wide']
@@ -2836,7 +2836,7 @@ class App:
                 sc.wide = self.wide_gain(name)
 
     def panel_burn_level(self, name):
-        """Narrow burn: the glow of a window's phosphor beam, 0 (clean lines) to 3 in steps of 0.1: chosen for the window, else the start (PANEL_DEFAULTS; the Classic theme: 1.0 for the
+        """Phosphor: the glow of a window's phosphor beam, 0 (clean lines) to 3 in steps of 0.1: chosen for the window, else the start (PANEL_DEFAULTS; the Classic theme: 1.0 for the
         vectorscope only, 0.4 for the rest, a crisp, light glow)"""
         o = self.panel_opts.get(name, {})
         if 'burn' in o:
@@ -2845,7 +2845,7 @@ class App:
         return PANEL_DEFAULTS.get(name, {}).get('burn', old) if self.th.glow else old
 
     def panel_crt(self, name):
-        """the CRT look (a phosphor beam with persistence, glow and white-hot lines), unless Narrow burn is 0: clean lines"""
+        """the CRT look (a phosphor beam with persistence, glow and white-hot lines), unless Phosphor is 0: clean lines"""
         return self.panel_burn_level(name) > 0
 
     def panel_colors(self, name):
@@ -2937,7 +2937,7 @@ class App:
         return tick, blank
 
     def panel_menu_build(self, name):
-        """the menu of a window: its grid, its info (numbers and text), Narrow burn, Wide burn and Line strength (steppers: a number with an arrow either side) and its colours (left and right; the vectorscope has one)"""
+        """the menu of a window: its grid, its info (numbers and text), Phosphor, Glow and Line strength (steppers: a number with an arrow either side) and its colours (left and right; the vectorscope has one)"""
         th = self.th
         px = max(10, int(round(tkfont.Font(root=self.root, font=self.F(9, 'Segoe UI')).metrics('linespace') * 0.8)))
         tick, blank = self.menu_marks(px)  # a tick or an empty space of the same size to the left of the words: the words line up
@@ -2953,8 +2953,8 @@ class App:
         menu._on = (grid_on, info_on, crt_on, burn)  # what is on
         if spectrogram:
             return menu
-        menu.add_stepper('Narrow burn', int(round(burn * 10)), int(round(BURN_MAX * 10)), burn_text, lambda n, save=True: self.set_panel_burn_level(name, n / 10.0, save))
-        menu.add_stepper('Wide burn', int(round(self.panel_wide_level(name) * 10)), int(round(BURN_MAX * 10)), burn_text, lambda n, save=True: self.set_panel_wide_level(name, n / 10.0, save), visible=lambda: self.panel_crt(name))
+        menu.add_stepper('Phosphor', int(round(burn * 10)), int(round(BURN_MAX * 10)), burn_text, lambda n, save=True: self.set_panel_burn_level(name, n / 10.0, save))
+        menu.add_stepper('Glow', int(round(self.panel_wide_level(name) * 10)), int(round(BURN_MAX * 10)), burn_text, lambda n, save=True: self.set_panel_wide_level(name, n / 10.0, save), visible=lambda: self.panel_crt(name))
         if name != 'met':  # (the weak end of the beam's brightness raised: more solid lines; only with the beam)
             menu.add_stepper('Line strength', self.panel_strength(name), STRENGTH_MAX, strength_text, lambda n, save=True: self.set_panel_strength(name, n, save), visible=lambda: self.panel_crt(name), n_min=STRENGTH_MIN)
         menu.add_separator()
